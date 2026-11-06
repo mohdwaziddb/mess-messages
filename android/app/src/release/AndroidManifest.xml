@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Release builds have NO network permission: the app cannot reach the internet even by accident. -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+</manifest>

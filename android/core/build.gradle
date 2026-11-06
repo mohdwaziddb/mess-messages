@@ -1,0 +1,21 @@
+// Pure-Kotlin core: crypto, protocol, routing, storage logic.
+// No Android dependencies so the whole protocol can be unit-tested on the JVM.
+apply plugin: "org.jetbrains.kotlin.jvm"
+
+def libsignalVersion = rootProject.ext.libsignalVersion
+
+kotlin { jvmToolchain(21) }
+
+dependencies {
+    // libsignal-android brings the Android natives in :app; here we only compile against the API.
+    compileOnly("org.signal:libsignal-client:$libsignalVersion")
+
+    testImplementation("org.signal:libsignal-client:$libsignalVersion")
+    testImplementation("org.xerial:sqlite-jdbc:3.46.1.3")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit")
+}
+
+test {
+    testLogging { events "passed", "failed", "skipped"; exceptionFormat "full" }
+}
