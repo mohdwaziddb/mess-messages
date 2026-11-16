@@ -57,9 +57,13 @@ class ProtoTest {
     @Test fun contentRoundTrip() {
         val items = listOf(
             Content.Text("id", 5, "héllo 👋"), Content.Receipt(2, listOf("a", "b")), Content.Profile("Asha"),
-            Content.GroupText("g", 3, "m", 9, "x"), Content.QrClaim(ByteArray(16) { 4 }),
+            Content.GroupText("g", 3, "m", 9, "x"),
         )
         items.forEach { assertEquals(it, Content.decode(Content.encode(it))) }
+        // Data classes holding a ByteArray compare by reference, so check the token bytes directly.
+        val token = ByteArray(16) { 4 }
+        val claim = Content.decode(Content.encode(Content.QrClaim(token))) as Content.QrClaim
+        org.junit.Assert.assertArrayEquals(token, claim.token)
     }
 
     @Test fun duplicateLinksResolveToSameLinkOnBothSides() {

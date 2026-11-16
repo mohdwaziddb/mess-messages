@@ -7,6 +7,7 @@ import {
 import { Icon } from '../components/Icon';
 import { QrView } from '../components/QrView';
 import { errorMessage, GroupDetails, Mesh, requestCameraPermission } from '../native/mesh';
+import { confirmBlock } from './main';
 import { useMesh } from '../store/useMesh';
 import { useTheme } from '../theme/theme';
 
@@ -50,7 +51,7 @@ export function CreateGroupScreen({ navigation, route }: any) {
           <RowGroup>
             {contacts.map((c, i) => (
               <Pressable key={c.id} onPress={() => toggle(c.id)} style={{ flexDirection: 'row', alignItems: 'center', padding: 12, borderBottomWidth: i === contacts.length - 1 ? 0 : 1, borderBottomColor: t.c.border }}>
-                <Avatar id={c.id} name={c.name} size={40} online={c.connected} />
+                <Avatar id={c.id} name={c.name} uri={c.avatar} size={40} online={c.connected} />
                 <View style={{ flex: 1, marginLeft: 12 }}>
                   <Text style={[t.font.body, { color: t.c.text, fontWeight: '600' }]}>{c.name}</Text>
                   <Text style={[t.font.small, { color: c.verified ? t.c.success : t.c.textDim }]}>{c.verified ? 'Verified' : 'Not verified'}</Text>
@@ -80,6 +81,9 @@ export function GroupDetailsScreen({ navigation, route }: any) {
   useFocusEffect(useCallback(() => { load(); }, [load]));
   const groupsTick = useMesh(s => s.groups);
   useEffect(() => { load(); }, [groupsTick, load]);
+  const myAvatar = useMesh(s => s.state?.profile?.avatar ?? null);
+  const contacts = useMesh(s => s.contacts);
+  const contactAvatars = React.useMemo(() => Object.fromEntries(contacts.map(c => [c.id, c.avatar ?? null])), [contacts]);
 
   const act = (fn: () => Promise<any>) => fn().then(load).catch(e => Alert.alert('Group', errorMessage(e)));
   if (!g) return <View style={{ flex: 1, backgroundColor: t.c.bg }}><Header title="Group" /></View>;
@@ -132,7 +136,7 @@ export function GroupDetailsScreen({ navigation, route }: any) {
         <RowGroup>
           {g.members.map((m, i) => (
             <Pressable key={m.id} onPress={() => memberMenu(m)} style={{ flexDirection: 'row', alignItems: 'center', padding: 12, borderBottomWidth: i === g.members.length - 1 ? 0 : 1, borderBottomColor: t.c.border }}>
-              <Avatar id={m.id} name={m.name} size={40} online={m.isMe ? undefined : m.connected} />
+              <Avatar id={m.id} name={m.name} uri={m.isMe ? myAvatar : contactAvatars[m.id]} size={40} online={m.isMe ? undefined : m.connected} />
               <View style={{ flex: 1, marginLeft: 12 }}>
                 <Text style={[t.font.body, { color: t.c.text, fontWeight: '600' }]}>{m.name}</Text>
                 <Text style={[t.font.small, { color: m.verified ? t.c.success : t.c.textDim }]}>{m.isMe ? 'You' : m.verified ? 'Verified' : 'Not verified'}</Text>
@@ -169,7 +173,10 @@ export function UserProfileScreen({ navigation, route }: any) {
   const refresh = () => useMesh.getState().refreshLists();
   if (!c) return <View style={{ flex: 1, backgroundColor: t.c.bg }}><Header title="Contact" /><Empty icon="user" title="Unknown contact" text="" /></View>;
 
-  const chat = async () => { const conv = await Mesh.openDirect(peerId); navigation.navigate('Chat', { convId: conv, peerId, title: c.name }); };
+  const chat = async () => {
+    try { const conv = await Mesh.openDirect(peerId); navigation.navigate('Chat', { convId: conv, peerId, title: c.name }); }
+    catch (e) { Alert.alert('Could not open chat', errorMessage(e)); }
+  };
   const groups = safety ? safety.match(/.{1,5}/g) ?? [] : [];
 
   return (
@@ -177,7 +184,7 @@ export function UserProfileScreen({ navigation, route }: any) {
       <Header title={c.name} subtitle={c.connected ? 'Connected nearby' : `Last seen ${timeAgo(c.lastSeen)}`} />
       <Screen>
         <View style={{ alignItems: 'center', marginVertical: 8 }}>
-          <Avatar id={c.id} name={c.name} size={86} online={c.connected} />
+          <Avatar id={c.id} name={c.name} uri={c.avatar} size={86} online={c.connected} />
           <View style={{ flexDirection: 'row', gap: 6, marginTop: 12 }}>
             {c.verified ? <Pill label="Verified" tone="success" icon="shield" /> : <Pill label="Not verified" tone="warning" icon="alert" />}
             {c.blocked ? <Pill label="Blocked" tone="danger" icon="slash" /> : null}
@@ -215,7 +222,7 @@ export function UserProfileScreen({ navigation, route }: any) {
         <RowGroup>
           <Row icon="trash" title="Clear conversation" onPress={() => Alert.alert('Clear conversation?', 'Deletes messages on this phone only.', [{ text: 'Cancel' }, { text: 'Clear', style: 'destructive', onPress: () => Mesh.clearConversation(`d:${peerId}`) }])} />
           <Row icon="key" title="Revoke device keys" subtitle="Delete the secure session; a fresh one is created on the next connection" onPress={() => Alert.alert('Revoke keys?', 'Sessions with this device are deleted and verification is reset.', [{ text: 'Cancel' }, { text: 'Revoke', style: 'destructive', onPress: () => Mesh.revoke(peerId).then(refresh) }])} />
-          <Row icon="slash" title={c.blocked ? 'Unblock' : 'Block'} danger={!c.blocked} last onPress={() => Mesh.block(peerId, !c.blocked).then(refresh)} />
+          <Row icon="slash" title={c.blocked ? 'Unblock' : 'Block'} danger={!c.blocked} last onPress={() => (c.blocked ? Mesh.block(peerId, false).then(refresh) : confirmBlock(c.name, () => { Mesh.block(peerId, true).then(refresh); }))} />
         </RowGroup>
       </Screen>
     </View>
@@ -242,7 +249,7 @@ export function MyQrScreen({ navigation }: any) {
       <Header title="My QR code" subtitle="Let a nearby person scan this" />
       <Screen>
         <Card style={{ alignItems: 'center', paddingVertical: 24 }}>
-          <Avatar id={state?.profile?.id ?? ''} name={state?.profile?.name ?? ''} size={56} />
+          <Avatar id={state?.profile?.id ?? ''} name={state?.profile?.name ?? ''} uri={state?.profile?.avatar} size={56} />
           <Text style={[t.font.h2, { color: t.c.text, marginTop: 8 }]}>{state?.profile?.name}</Text>
           <View style={{ backgroundColor: '#fff', padding: 14, borderRadius: 20, marginTop: 16 }}>
             {qr ? <QrView value={qr} size={230} /> : <View style={{ width: 230, height: 230, alignItems: 'center', justifyContent: 'center' }}><Icon name="qr" size={60} color="#bbb" /></View>}

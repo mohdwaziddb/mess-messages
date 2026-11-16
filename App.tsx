@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
-import { AppState, Text, View } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { AppState, Pressable, Text, View } from 'react-native';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DarkTheme, DefaultTheme, NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -27,13 +27,16 @@ const tabIcons: Record<string, IconName> = { Home: 'home', Chats: 'chat', Nearby
 
 function Tabs() {
   const t = useTheme();
+  // The app draws edge-to-edge, so the tab bar must sit above the system navigation bar:
+  // tiny with gesture navigation, ~48 dp with the 3-button bar.
+  const bottom = useSafeAreaInsets().bottom;
   const unread = useMesh(s => s.conversations.reduce((n, c) => n + c.unread, 0) + s.invites.length);
   return (
     <Tab.Navigator screenOptions={({ route }) => ({
       headerShown: false,
       tabBarActiveTintColor: t.c.primary,
       tabBarInactiveTintColor: t.c.textFaint,
-      tabBarStyle: { backgroundColor: t.c.surface, borderTopColor: t.c.border, height: 64, paddingBottom: 8, paddingTop: 6 },
+      tabBarStyle: { backgroundColor: t.c.surface, borderTopColor: t.c.border, height: 64 + bottom, paddingBottom: 8 + bottom, paddingTop: 6 },
       tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
       tabBarIcon: ({ color }) => <Icon name={tabIcons[route.name]} color={color} size={22} />,
     })}>
@@ -46,7 +49,31 @@ function Tabs() {
   );
 }
 
+/** Last line of defence: a render error in any screen shows a recovery view instead of closing the app. */
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error) { console.warn('[OfflineMesh] screen error', error?.message); }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0B0E14', padding: 24 }}>
+        <Text style={{ color: '#FFFFFF', fontSize: 20, fontWeight: '700' }}>Something went wrong</Text>
+        <Text style={{ color: '#9AA4B2', textAlign: 'center', marginTop: 8 }}>{String(this.state.error?.message ?? '')}</Text>
+        <Pressable onPress={() => this.setState({ error: null })}
+          style={{ marginTop: 20, backgroundColor: '#2F6BFF', paddingHorizontal: 22, paddingVertical: 12, borderRadius: 12 }}>
+          <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Try again</Text>
+        </Pressable>
+      </View>
+    );
+  }
+}
+
 export default function App() {
+  return <ErrorBoundary><AppRoot /></ErrorBoundary>;
+}
+
+function AppRoot() {
   const t = useTheme();
   const { ready, state, error, refreshState, refreshLists, refreshNearby } = useMesh();
   const onboarding = useOnboarding(s => s.active);

@@ -40,6 +40,20 @@ describe('ui components', () => {
     expect(s).toContain('Compare numbers');
   });
 
+  test('Avatar shows the profile photo when there is one, initials otherwise or if it fails to load', async () => {
+    const { Image } = require('react-native');
+    let tree!: ReactTestRenderer.ReactTestRenderer;
+    await act(async () => { tree = ReactTestRenderer.create(<Avatar id="1" name="Asha Rao" uri="data:image/jpeg;base64,AAAA" />); });
+    const img = tree.root.findAllByType(Image);
+    expect(img).toHaveLength(1);
+    expect(img[0].props.source).toEqual({ uri: 'data:image/jpeg;base64,AAAA' });
+    expect(textOf(tree)).not.toContain('AR');
+    // Broken image data falls back to initials instead of an empty circle.
+    await act(async () => { img[0].props.onError(); });
+    expect(tree.root.findAllByType(Image)).toHaveLength(0);
+    expect(textOf(tree)).toContain('AR');
+  });
+
   test('formatting helpers', () => {
     expect(bytes(500)).toBe('500 B');
     expect(bytes(2048)).toBe('2.0 KB');

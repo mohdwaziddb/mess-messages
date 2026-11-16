@@ -6,7 +6,7 @@ export type IconName =
   | 'home' | 'chat' | 'radar' | 'shield' | 'settings' | 'qr' | 'scan' | 'plus' | 'send' | 'back' | 'check'
   | 'checks' | 'clock' | 'alert' | 'lock' | 'users' | 'user' | 'file' | 'trash' | 'chevron' | 'bluetooth'
   | 'battery' | 'refresh' | 'mesh' | 'paperclip' | 'x' | 'eye' | 'eyeOff' | 'database' | 'help' | 'key' | 'download'
-  | 'slash' | 'edit' | 'logout' | 'wifi';
+  | 'slash' | 'edit' | 'logout' | 'wifi' | 'pin' | 'more' | 'share' | 'external' | 'arrowDown';
 
 export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: { name: IconName; size?: number; color?: string; strokeWidth?: number }) {
   const p = { stroke: color, strokeWidth, fill: 'none', strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
@@ -36,6 +36,11 @@ export function Icon({ name, size = 22, color = '#fff', strokeWidth = 2 }: { nam
       case 'trash': return <><Polyline {...p} points="3 6 5 6 21 6" /><Path {...p} d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></>;
       case 'bluetooth': return <Polyline {...p} points="6.5 6.5 17.5 17.5 12 23 12 1 17.5 6.5 6.5 17.5" />;
       case 'wifi': return <><Path {...p} d="M5 12.6a10 10 0 0 1 14 0M8.5 16.1a5 5 0 0 1 7 0M2 8.8a15 15 0 0 1 20 0" /><Line {...p} x1={12} y1={20} x2={12.01} y2={20} /></>;
+      case 'pin': return <><Path {...p} d="M9 3h6l-1 6 4 4H6l4-4z" /><Line {...p} x1={12} y1={13} x2={12} y2={21} /></>;
+      case 'more': return <><Circle cx={12} cy={5} r={1.8} fill={color} /><Circle cx={12} cy={12} r={1.8} fill={color} /><Circle cx={12} cy={19} r={1.8} fill={color} /></>;
+      case 'share': return <><Circle {...p} cx={18} cy={5} r={3} /><Circle {...p} cx={6} cy={12} r={3} /><Circle {...p} cx={18} cy={19} r={3} /><Path {...p} d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" /></>;
+      case 'external': return <><Path {...p} d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><Path {...p} d="M15 3h6v6M10 14 21 3" /></>;
+      case 'arrowDown': return <><Line {...p} x1={12} y1={5} x2={12} y2={19} /><Polyline {...p} points="19 12 12 19 5 12" /></>;
       case 'battery': return <><Rect {...p} x={1} y={6} width={18} height={12} rx={2} /><Line {...p} x1={23} y1={13} x2={23} y2={11} /><Line {...p} x1={5} y1={10} x2={5} y2={14} /><Line {...p} x1={9} y1={10} x2={9} y2={14} /></>;
       case 'refresh': return <><Polyline {...p} points="23 4 23 10 17 10" /><Path {...p} d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10" /></>;
       case 'mesh': return <><Circle {...p} cx={12} cy={5} r={2.5} /><Circle {...p} cx={5} cy={18} r={2.5} /><Circle {...p} cx={19} cy={18} r={2.5} /><Path {...p} d="M10.8 7.2 6.3 15.8M13.2 7.2l4.5 8.6M7.5 18h9" /></>;

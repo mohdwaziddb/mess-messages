@@ -71,6 +71,7 @@ payload = HPKE-seal(recipientIdentityPub, info="OfflineMesh-v1-envelope", aad=AA
 | 7 | `Attachment(str groupId, u32 epoch, str msgId, u64 sentAt, str name, str mime, u64 size ≤ 8 MiB, bytes16 sha256, u32 chunkCount)` |
 | 8 | `AttachmentChunk(str groupId, u32 epoch, str msgId, u32 index, bytes32 data ≤ 32 KiB)` |
 | 9 | `QrClaim(bytes16 token[16])` |
+| 10 | `Avatar(bytes32 image ≤ 64 KiB)`: JPEG or PNG profile photo (checked by magic bytes), empty = removed. Sent with `Profile` only when the photo changed since the last send to that contact. |
 
 **Acknowledgement.** Every `Text`, `Attachment`, `AttachmentChunk`, `GroupText`, `GroupOp` and `SenderKey` is acknowledged with `Receipt(delivered, [ackId])`:
 

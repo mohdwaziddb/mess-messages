@@ -23,4 +23,17 @@ describe('mesh store', () => {
     expect(useMesh.getState().error).toBeNull();
     NativeModules.OfflineMesh.getState = real;
   });
+
+  // Regression: with the BLE service off, native nearby() used to return [] and HomeScreen crashed on people.length.
+  test.each([[[]], [null], [{}], [{ people: null, devices: undefined }]])('refreshNearby normalizes malformed reply %p', async reply => {
+    const { NativeModules } = require('react-native');
+    const real = NativeModules.OfflineMesh.nearby;
+    NativeModules.OfflineMesh.nearby = jest.fn(async () => reply);
+    await useMesh.getState().refreshNearby();
+    const n = useMesh.getState().nearby!;
+    expect(n.people).toEqual([]);
+    expect(n.devices).toEqual([]);
+    expect(n.links).toBe(0);
+    NativeModules.OfflineMesh.nearby = real;
+  });
 });

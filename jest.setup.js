@@ -31,6 +31,10 @@ jest.mock('react-native-safe-area-context', () => {
     useSafeAreaInsets: () => inset,
   };
 });
+jest.mock('@react-navigation/bottom-tabs', () => ({
+  // Outside a tab navigator the real context value is undefined, which is what component tests need.
+  BottomTabBarHeightContext: require('react').createContext(undefined),
+}));
 jest.mock('@react-navigation/native', () => ({
   useNavigation: () => ({ canGoBack: () => false, goBack: jest.fn(), navigate: jest.fn() }),
   useFocusEffect: jest.fn(),

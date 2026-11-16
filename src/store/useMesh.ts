@@ -50,7 +50,21 @@ export const useMesh = create<Store>((set, get) => ({
     set({ error: 'Secure storage did not open', ready: true });
   },
   refreshNearby: async () => {
-    try { set({ nearby: await Mesh.nearby() }); } catch {}
+    try {
+      const n: any = await Mesh.nearby();
+      // Guard against a malformed native reply so the screens never read .length of undefined.
+      const ok = n && typeof n === 'object' && !Array.isArray(n);
+      set({
+        nearby: {
+          ...(ok ? n : {}),
+          people: Array.isArray(n?.people) ? n.people : [],
+          devices: Array.isArray(n?.devices) ? n.devices : [],
+          links: typeof n?.links === 'number' ? n.links : 0,
+          scanning: !!n?.scanning,
+          visible: !!n?.visible,
+        },
+      });
+    } catch {}
   },
   refreshLists: async () => {
     if (!get().state?.hasIdentity) return;

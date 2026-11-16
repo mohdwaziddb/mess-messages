@@ -60,5 +60,22 @@
         android:name=".service.MeshService"
         android:exported="false"
         android:foregroundServiceType="connectedDevice" />
+
+      <!-- Lets another app (PDF viewer, gallery) read one decrypted attachment the user chose to open. -->
+      <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.files"
+        android:exported="false"
+        android:grantUriPermissions="true">
+        <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+      </provider>
     </application>
+
+    <!-- Android 11+: allow resolving which apps can open a file (no other package visibility). -->
+    <queries>
+      <intent>
+        <action android:name="android.intent.action.VIEW" />
+        <data android:mimeType="*/*" />
+      </intent>
+    </queries>
 </manifest>

@@ -4,7 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Avatar, Banner, Button, Card, Empty, Header, Pill, Pulse, Screen, SectionLabel, Stat, timeAgo } from '../components/ui';
 import { Icon, IconName } from '../components/Icon';
-import { errorMessage, Mesh, requestNearbyPermissions } from '../native/mesh';
+import { Conversation, errorMessage, Mesh, requestNearbyPermissions } from '../native/mesh';
 import { stats, useMesh } from '../store/useMesh';
 import { useTheme } from '../theme/theme';
 
@@ -63,7 +63,7 @@ export function HomeScreen({ navigation }: any) {
     <View style={{ flex: 1, backgroundColor: t.c.bg }}>
       <Screen>
         <View style={{ paddingTop: insets.top + 12, flexDirection: 'row', alignItems: 'center', marginBottom: 18 }}>
-          <Pressable onPress={() => navigation.navigate('MyQr')}><Avatar id={state?.profile?.id ?? ''} name={state?.profile?.name ?? ''} size={48} /></Pressable>
+          <Pressable onPress={() => navigation.navigate('MyQr')}><Avatar id={state?.profile?.id ?? ''} name={state?.profile?.name ?? ''} uri={state?.profile?.avatar} size={48} /></Pressable>
           <View style={{ flex: 1, marginLeft: 12 }}>
             <Text style={[t.font.small, { color: t.c.textDim }]}>Offline Mesh</Text>
             <Text style={[t.font.h2, { color: t.c.text }]} numberOfLines={1}>Hi, {state?.profile?.name}</Text>
@@ -104,12 +104,17 @@ export function HomeScreen({ navigation }: any) {
 
         <SectionLabel>Overview</SectionLabel>
         <View style={{ flexDirection: 'row', gap: 10 }}>
-          <Stat label="Connected" value={s.connected} icon="bluetooth" />
-          <Stat label="Contacts" value={s.contacts} icon="user" />
+          <Stat label="Connected" value={s.connected} icon="bluetooth" onPress={() => navigation.navigate('Nearby')} />
+          <Stat label="Contacts" value={s.contacts} icon="user" onPress={() => navigation.navigate('VerifiedDevices')} />
         </View>
         <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
-          <Stat label="Waiting to send" value={s.pending} icon="clock" tone={s.pending ? t.c.warning : undefined} />
-          <Stat label="Groups" value={s.groups} icon="users" />
+          <Stat label="Waiting to send" value={s.pending} icon="clock" tone={s.pending ? t.c.warning : undefined}
+            onPress={() => (s.pending
+              ? Alert.alert('Waiting to send', `${s.pending} message${s.pending > 1 ? 's are' : ' is'} waiting for the recipient to come in range (directly or through other phones). They are sent automatically, and stay here until the other phone confirms it received them.`, [
+                { text: 'OK', style: 'cancel' }, { text: 'Open chats', onPress: () => navigation.navigate('Chats') },
+              ])
+              : navigation.navigate('Chats'))} />
+          <Stat label="Groups" value={s.groups} icon="users" onPress={() => navigation.navigate(s.groups ? 'Chats' : 'CreateGroup')} />
         </View>
 
         <SectionLabel>Status</SectionLabel>
@@ -132,12 +137,37 @@ export function HomeScreen({ navigation }: any) {
   );
 }
 
+/** Shared confirmation for blocking, so every entry point says the same thing. */
+export function confirmBlock(name: string, onConfirm: () => void) {
+  Alert.alert(`Block ${name}?`, 'They can no longer connect to you or send you messages. Your chat history stays on this phone. You can unblock any time.', [
+    { text: 'Cancel', style: 'cancel' }, { text: 'Block', style: 'destructive', onPress: onConfirm },
+  ]);
+}
+
 export function ChatsScreen({ navigation }: any) {
   const t = useTheme();
   const { conversations, invites, refreshLists } = useMesh();
   const [refreshing, setRefreshing] = useState(false);
   useFocusEffect(React.useCallback(() => { refreshLists(); }, [refreshLists]));
   const open = (c: any) => navigation.navigate(c.kind === 'group' ? 'GroupChat' : 'Chat', { convId: c.id, title: c.title, peerId: c.peerId, groupId: c.groupId });
+
+  const chatMenu = (c: Conversation) => {
+    const run = (fn: () => Promise<any>, what: string) => fn().then(() => refreshLists()).catch(e => Alert.alert(what, errorMessage(e)));
+    const actions: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [
+      { text: c.pinned ? 'Unpin chat' : 'Pin chat', onPress: () => run(() => Mesh.setPinned(c.id, !c.pinned), 'Pin') },
+    ];
+    if (c.kind === 'direct' && c.peerId) {
+      const peer = c.peerId;
+      actions.push(c.blocked
+        ? { text: 'Unblock', onPress: () => run(() => Mesh.block(peer, false), 'Unblock') }
+        : { text: 'Block', style: 'destructive', onPress: () => confirmBlock(c.title, () => run(() => Mesh.block(peer, true), 'Block')) });
+    }
+    actions.push({ text: 'Clear chat', style: 'destructive', onPress: () => Alert.alert('Clear chat?', 'Messages in this chat are deleted from this phone only.', [
+      { text: 'Cancel', style: 'cancel' }, { text: 'Clear', style: 'destructive', onPress: () => run(() => Mesh.clearConversation(c.id), 'Clear chat') },
+    ]) });
+    actions.push({ text: 'Cancel', style: 'cancel' });
+    Alert.alert(c.title, undefined, actions);
+  };
 
   const inviteAction = async (groupId: string, accept: boolean) => {
     try {
@@ -149,7 +179,11 @@ export function ChatsScreen({ navigation }: any) {
   return (
     <View style={{ flex: 1, backgroundColor: t.c.bg }}>
       <Header title="Chats" back={false} right={
-        <Pressable onPress={() => navigation.navigate('CreateGroup')} hitSlop={10} style={{ padding: 6 }}><Icon name="users" color={t.c.primary} /></Pressable>
+        <Pressable onPress={() => navigation.navigate('CreateGroup')} hitSlop={10} accessibilityRole="button" accessibilityLabel="New group"
+          style={({ pressed }) => ({ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18, backgroundColor: t.c.primarySoft, opacity: pressed ? 0.7 : 1 })}>
+          <Icon name="plus" size={16} color={t.c.primary} />
+          <Text style={{ color: t.c.primary, fontWeight: '600' }}>New group</Text>
+        </Pressable>
       } />
       <FlatList
         data={conversations}
@@ -169,25 +203,28 @@ export function ChatsScreen({ navigation }: any) {
             ))}
           </View>
         ) : undefined}
+        ListFooterComponent={conversations.length ? <Text style={[t.font.tiny, { color: t.c.textFaint, textAlign: 'center', marginVertical: 14 }]}>Long-press a chat to pin, block or clear it</Text> : undefined}
         ListEmptyComponent={<Empty icon="chat" title="No conversations yet" text="Find someone nearby or scan their QR code to start a secure chat."
           action={<Button title="Find nearby" icon="radar" onPress={() => navigation.navigate('Nearby')} />} />}
         renderItem={({ item: c }) => (
-          <Pressable onPress={() => open(c)} style={({ pressed }) => ({ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, backgroundColor: pressed ? t.c.surface : 'transparent' })}>
+          <Pressable onPress={() => open(c)} onLongPress={() => chatMenu(c)} delayLongPress={350} style={({ pressed }) => ({ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, backgroundColor: pressed ? t.c.surface : 'transparent' })}>
             {c.kind === 'group' ? (
               <View style={{ width: 50, height: 50, borderRadius: 16, backgroundColor: t.c.accentSoft, alignItems: 'center', justifyContent: 'center' }}>
                 <Icon name="users" color={t.c.accent} />
               </View>
-            ) : <Avatar id={c.peerId ?? c.id} name={c.title} size={50} online={c.connected} />}
+            ) : <Avatar id={c.peerId ?? c.id} name={c.title} uri={c.avatar} size={50} online={c.connected} />}
             <View style={{ flex: 1, marginLeft: 12 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <Text style={[t.font.h3, { color: t.c.text, flexShrink: 1 }]} numberOfLines={1}>{c.title}</Text>
                 {c.kind === 'direct' && c.verified ? <View style={{ marginLeft: 5 }}><Icon name="shield" size={14} color={t.c.success} /></View> : null}
                 {c.identityWarning ? <View style={{ marginLeft: 5 }}><Icon name="alert" size={14} color={t.c.warning} /></View> : null}
+                {c.blocked ? <View style={{ marginLeft: 5 }}><Icon name="slash" size={14} color={t.c.danger} /></View> : null}
                 <Text style={[t.font.tiny, { color: t.c.textFaint, marginLeft: 'auto' }]}>{c.lastMsgAt ? timeAgo(c.lastMsgAt) : ''}</Text>
+                {c.pinned ? <View style={{ marginLeft: 6 }}><Icon name="pin" size={13} color={t.c.textDim} /></View> : null}
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
                 <Text style={[t.font.small, { color: c.unread ? t.c.text : t.c.textDim, flex: 1 }]} numberOfLines={1}>
-                  {!c.active ? 'You are no longer a member' : c.preview || 'Encrypted chat ready'}
+                  {!c.active ? 'You are no longer a member' : c.blocked ? 'Blocked' : c.preview || 'Encrypted chat ready'}
                 </Text>
                 {c.unread ? <View style={{ minWidth: 20, height: 20, borderRadius: 10, backgroundColor: t.c.primary, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 }}>
                   <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>{c.unread}</Text>
@@ -227,7 +264,7 @@ export function NearbyScreen({ navigation }: any) {
       <Screen>
         <View style={{ alignItems: 'center', marginVertical: 12 }}>
           <Pulse color={svc.running ? t.c.primary : t.c.textFaint} size={170} active={svc.running}>
-            <Avatar id={state?.profile?.id ?? ''} name={state?.profile?.name ?? ''} size={64} />
+            <Avatar id={state?.profile?.id ?? ''} name={state?.profile?.name ?? ''} uri={state?.profile?.avatar} size={64} />
           </Pulse>
           <Text style={[t.font.small, { color: t.c.textDim, marginTop: 6, textAlign: 'center' }]}>
             {svc.running ? (nearby?.visible ? 'Others nearby can find you. Your name is only shared after a secure connection.' : 'You are hidden. You can still find others.') : 'Turn on discovery to find people around you.'}
@@ -241,7 +278,7 @@ export function NearbyScreen({ navigation }: any) {
             {nearby?.people.length ? nearby.people.map(p => (
               <Card key={p.id} style={{ marginBottom: 10 }} onPress={() => navigation.navigate('UserProfile', { peerId: p.id })}>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <Avatar id={p.id} name={p.name} online />
+                  <Avatar id={p.id} name={p.name} uri={p.avatar} online />
                   <View style={{ flex: 1, marginLeft: 12 }}>
                     <Text style={[t.font.h3, { color: t.c.text }]}>{p.name}</Text>
                     <View style={{ flexDirection: 'row', gap: 6, marginTop: 5 }}>

@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Alert, FlatList, Image, KeyboardAvoidingView, Pressable, Text, TextInput, View,
+  Alert, FlatList, Image, KeyboardAvoidingView, Modal, NativeScrollEvent, NativeSyntheticEvent, Pressable, Text, TextInput, View,
 } from 'react-native';
+import { confirmBlock } from './main';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Avatar, Banner, bytes, clock, Header, Pill } from '../components/ui';
+import { Avatar, Banner, Button, bytes, clock, Header, Pill } from '../components/ui';
 import { Icon } from '../components/Icon';
 import { errorMessage, Mesh, Message } from '../native/mesh';
 import { useMesh } from '../store/useMesh';
@@ -27,24 +28,85 @@ const statusLabel: Record<string, string> = {
   failed: 'Not delivered (expired)', received: 'Received', receiving: 'Receiving…',
 };
 
+/** Decrypted copy to Downloads/OfflineMesh, only when the user asks. */
+export function downloadAttachment(m: Message) {
+  Mesh.saveAttachment(m.id)
+    .then(p => Alert.alert('Downloaded', `Saved to ${p}`))
+    .catch(e => Alert.alert('Download', errorMessage(e)));
+}
+
+function openAttachment(m: Message) {
+  Mesh.openAttachment(m.id).catch(e => Alert.alert('Open', errorMessage(e)));
+}
+
+/** Full-screen photo with Download. */
+function ImageViewer({ m, uri, onClose }: { m: Message; uri: string; onClose: () => void }) {
+  const insets = useSafeAreaInsets();
+  const btn = { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 8, paddingHorizontal: 18, paddingVertical: 12, borderRadius: 24, backgroundColor: 'rgba(255,255,255,0.14)' };
+  return (
+    <Modal visible animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+        <View style={{ paddingTop: insets.top + 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center' }}>
+          <Pressable onPress={onClose} hitSlop={12} style={{ padding: 8 }} accessibilityLabel="Close"><Icon name="x" color="#fff" /></Pressable>
+          <Text style={{ color: '#fff', flex: 1, marginLeft: 6, fontWeight: '600' }} numberOfLines={1}>{m.body}</Text>
+        </View>
+        <Image source={{ uri }} style={{ flex: 1 }} resizeMode="contain" accessibilityLabel={m.body} />
+        <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 12, paddingBottom: insets.bottom + 16, paddingTop: 12 }}>
+          <Pressable onPress={() => downloadAttachment(m)} style={btn} accessibilityLabel="Download">
+            <Icon name="download" color="#fff" size={18} /><Text style={{ color: '#fff', fontWeight: '600' }}>Download</Text>
+          </Pressable>
+          <Pressable onPress={() => openAttachment(m)} style={btn} accessibilityLabel="Open in another app">
+            <Icon name="external" color="#fff" size={18} /><Text style={{ color: '#fff', fontWeight: '600' }}>Open with…</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function Attachment({ m }: { m: Message }) {
   const t = useTheme();
   const [uri, setUri] = useState<string | null>(null);
+  const [viewing, setViewing] = useState(false);
   const isImage = (m.mime ?? '').startsWith('image/');
   useEffect(() => { if (isImage && m.complete) Mesh.attachmentDataUri(m.id).then(setUri).catch(() => {}); }, [m.id, m.complete, isImage]);
   const fg = m.outgoing ? t.c.bubbleOutText : t.c.bubbleInText;
-  if (isImage && uri) return <Image source={{ uri }} style={{ width: 220, height: 220, borderRadius: 12, marginBottom: 4 }} resizeMode="cover" />;
+  const progress = !m.complete && m.progress != null ? `${Math.round(m.progress * 100)}%` : null;
+
+  if (isImage && uri) {
+    return (
+      <>
+        <Pressable onPress={() => setViewing(true)} accessibilityLabel={`Photo ${m.body}, tap to view`}>
+          <Image source={{ uri }} style={{ width: 220, height: 220, borderRadius: 12, marginBottom: 4 }} resizeMode="cover" />
+        </Pressable>
+        {viewing ? <ImageViewer m={m} uri={uri} onClose={() => setViewing(false)} /> : null}
+      </>
+    );
+  }
+  const small = { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 5, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, backgroundColor: 'rgba(127,127,127,0.18)' };
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', minWidth: 180 }}>
-      <View style={{ width: 38, height: 38, borderRadius: 10, backgroundColor: 'rgba(127,127,127,0.18)', alignItems: 'center', justifyContent: 'center' }}>
-        <Icon name="file" size={19} color={fg} />
+    <View style={{ minWidth: 200 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <View style={{ width: 38, height: 38, borderRadius: 10, backgroundColor: 'rgba(127,127,127,0.18)', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name={isImage ? 'eye' : 'file'} size={19} color={fg} />
+        </View>
+        <View style={{ marginLeft: 10, flexShrink: 1 }}>
+          <Text style={{ color: fg, fontWeight: '600' }} numberOfLines={1}>{m.body}</Text>
+          <Text style={{ color: fg, opacity: 0.7, fontSize: 12 }}>
+            {m.size ? bytes(m.size) : ''}{progress ? ` · ${m.outgoing ? 'sending' : 'receiving'} ${progress}` : ''}
+          </Text>
+        </View>
       </View>
-      <View style={{ marginLeft: 10, flexShrink: 1 }}>
-        <Text style={{ color: fg, fontWeight: '600' }} numberOfLines={1}>{m.body}</Text>
-        <Text style={{ color: fg, opacity: 0.7, fontSize: 12 }}>
-          {m.size ? bytes(m.size) : ''}{!m.complete && m.progress != null ? ` · ${Math.round(m.progress * 100)}%` : ''}
-        </Text>
-      </View>
+      {m.complete ? (
+        <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+          <Pressable onPress={() => openAttachment(m)} style={small} accessibilityLabel="Open file">
+            <Icon name="external" size={14} color={fg} /><Text style={{ color: fg, fontSize: 13, fontWeight: '600' }}>Open</Text>
+          </Pressable>
+          <Pressable onPress={() => downloadAttachment(m)} style={small} accessibilityLabel="Download file">
+            <Icon name="download" size={14} color={fg} /><Text style={{ color: fg, fontSize: 13, fontWeight: '600' }}>Download</Text>
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -98,6 +160,23 @@ export function ChatScreen({ route, navigation }: any) {
   }, [convId]);
 
   useEffect(() => { load(); }, [load, tick]);
+
+  // Newest-first data in an inverted list: opens at the latest message, stays put while the user reads
+  // older ones, and never jumps when an image finishes loading.
+  const listData = React.useMemo(() => [...messages].reverse(), [messages]);
+  const atBottom = useRef(true);
+  const [unseen, setUnseen] = useState(0);
+  const lastNewest = useRef<string | null>(null);
+  useEffect(() => {
+    const newest = listData[0]?.id ?? null;
+    if (lastNewest.current && newest && newest !== lastNewest.current && !atBottom.current && !listData[0].outgoing) setUnseen(n => n + 1);
+    lastNewest.current = newest;
+  }, [listData]);
+  const toLatest = (animated = true) => { listRef.current?.scrollToOffset({ offset: 0, animated }); setUnseen(0); };
+  const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    atBottom.current = e.nativeEvent.contentOffset.y < 80;
+    if (atBottom.current && unseen) setUnseen(0);
+  };
   // Chat screen is open: everything shown counts as read (sends read receipts if enabled).
   useEffect(() => { Mesh.markRead(convId).catch(() => {}); }, [convId, tick]);
 
@@ -105,7 +184,7 @@ export function ChatScreen({ route, navigation }: any) {
     const body = text.trim();
     if (!body) return;
     setSending(true);
-    try { await Mesh.sendText(convId, body); setText(''); load(); }
+    try { await Mesh.sendText(convId, body); setText(''); await load(); toLatest(false); }
     catch (e) { Alert.alert('Not sent', errorMessage(e)); } finally { setSending(false); }
   };
 
@@ -114,17 +193,44 @@ export function ChatScreen({ route, navigation }: any) {
       const uri = await Mesh.pickFile();
       if (!uri) return;
       await Mesh.sendFile(convId, uri);
-      load();
+      await load(); toLatest(false);
     } catch (e) { Alert.alert('File not sent', errorMessage(e)); }
   };
 
   const onLong = (m: Message) => {
     const actions: { text: string; onPress?: () => void; style?: any }[] = [];
     if (m.outgoing && m.status === 'failed' && m.kind === 'text') actions.push({ text: 'Retry', onPress: () => Mesh.retryMessage(m.id).then(load).catch(e => Alert.alert('Retry', errorMessage(e))) });
-    if (m.kind === 'file' && m.complete) actions.push({ text: 'Save to Downloads', onPress: () => Mesh.saveAttachment(m.id).then(p => Alert.alert('Saved', p)).catch(e => Alert.alert('Save', errorMessage(e))) });
+    if (m.kind === 'file' && m.complete) {
+      actions.push({ text: 'Open', onPress: () => openAttachment(m) });
+      actions.push({ text: 'Download', onPress: () => downloadAttachment(m) });
+    }
     actions.push({ text: 'Delete for me', style: 'destructive', onPress: () => Mesh.deleteMessage(m.id).then(load) });
     actions.push({ text: 'Cancel', style: 'cancel' });
     Alert.alert(statusLabel[m.status] ?? m.status, new Date(m.sentAt).toLocaleString(), actions);
+  };
+
+  const peerId: string | undefined = conv?.peerId ?? route.params.peerId;
+  const blocked = !isGroup && !!(contact?.blocked ?? conv?.blocked);
+  const refreshLists = () => useMesh.getState().refreshLists();
+  const setBlocked = (b: boolean) => peerId && Mesh.block(peerId, b).then(refreshLists).catch(e => Alert.alert(b ? 'Block' : 'Unblock', errorMessage(e)));
+
+  const chatMenu = () => {
+    const actions: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [
+      { text: isGroup ? 'Group info' : 'View contact', onPress: () => (isGroup
+        ? navigation.navigate('GroupDetails', { groupId: groupId ?? String(convId).slice(2) })
+        : navigation.navigate('UserProfile', { peerId })) },
+      { text: conv?.pinned ? 'Unpin chat' : 'Pin chat', onPress: () => Mesh.setPinned(convId, !conv?.pinned).then(refreshLists).catch(e => Alert.alert('Pin', errorMessage(e))) },
+    ];
+    if (!isGroup && peerId) {
+      actions.push(blocked ? { text: 'Unblock', onPress: () => setBlocked(false) }
+        : { text: 'Block', style: 'destructive', onPress: () => confirmBlock(title, () => setBlocked(true)) });
+    }
+    actions.push({ text: 'Clear chat', style: 'destructive', onPress: () => Alert.alert('Clear chat?', 'Messages in this chat are deleted from this phone only.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Clear', style: 'destructive', onPress: () => Mesh.clearConversation(convId).then(() => { load(); refreshLists(); }).catch(e => Alert.alert('Clear chat', errorMessage(e))) },
+    ]) });
+    actions.push({ text: 'Cancel', style: 'cancel' });
+    Alert.alert(title, undefined, actions);
   };
 
   const title = conv?.title ?? route.params.title ?? 'Chat';
@@ -134,12 +240,17 @@ export function ChatScreen({ route, navigation }: any) {
 
   return (
     <KeyboardAvoidingView style={{ flex: 1, backgroundColor: t.c.bg }} behavior="height">
-      <Header title={title} subtitle={subtitle} right={
-        <Pressable hitSlop={10} style={{ padding: 6 }} onPress={() => isGroup
-          ? navigation.navigate('GroupDetails', { groupId: groupId ?? String(convId).slice(2) })
-          : navigation.navigate('UserProfile', { peerId: conv?.peerId ?? route.params.peerId })}>
-          {isGroup ? <Icon name="users" color={t.c.primary} /> : <Avatar id={conv?.peerId ?? ''} name={title} size={34} online={conv?.connected} />}
-        </Pressable>
+      <Header title={title} subtitle={blocked ? 'Blocked' : subtitle} right={
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Pressable hitSlop={10} style={{ padding: 6 }} onPress={() => isGroup
+            ? navigation.navigate('GroupDetails', { groupId: groupId ?? String(convId).slice(2) })
+            : navigation.navigate('UserProfile', { peerId })}>
+            {isGroup ? <Icon name="users" color={t.c.primary} /> : <Avatar id={peerId ?? ''} name={title} uri={contact?.avatar ?? conv?.avatar} size={34} online={conv?.connected} />}
+          </Pressable>
+          <Pressable hitSlop={10} style={{ padding: 6, marginLeft: 2 }} onPress={chatMenu} accessibilityLabel="Chat options">
+            <Icon name="more" color={t.c.text} />
+          </Pressable>
+        </View>
       } />
       {!isGroup && contact && !contact.verified ? (
         <View style={{ paddingHorizontal: 12 }}>
@@ -149,23 +260,43 @@ export function ChatScreen({ route, navigation }: any) {
             action={<Pressable onPress={() => navigation.navigate('UserProfile', { peerId: contact.id })}><Text style={{ color: t.c.primary, fontWeight: '600' }}>Verify now</Text></Pressable>} />
         </View>
       ) : null}
-      <FlatList
-        ref={listRef}
-        data={messages}
-        keyExtractor={m => m.id}
-        renderItem={({ item }) => <Bubble m={item} group={isGroup} onLong={onLong} />}
-        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
-        contentContainerStyle={{ paddingVertical: 10 }}
-        ListEmptyComponent={
-          <View style={{ alignItems: 'center', padding: 32 }}>
-            <Pill label="Messages are end-to-end encrypted" tone="primary" icon="lock" />
-            <Text style={[t.font.small, { color: t.c.textDim, textAlign: 'center', marginTop: 10 }]}>
-              Nobody else — not even phones that relay your messages — can read them.
-            </Text>
-          </View>
-        }
-      />
-      {conv && !conv.active ? null : (
+      {messages.length === 0 ? (
+        // Rendered outside the inverted list (an empty component inside it would appear upside down).
+        <View style={{ flex: 1, alignItems: 'center', padding: 32 }}>
+          <Pill label="Messages are end-to-end encrypted" tone="primary" icon="lock" />
+          <Text style={[t.font.small, { color: t.c.textDim, textAlign: 'center', marginTop: 10 }]}>
+            Nobody else — not even phones that relay your messages — can read them.
+          </Text>
+        </View>
+      ) : (
+        <View style={{ flex: 1 }}>
+          <FlatList
+            ref={listRef}
+            inverted
+            data={listData}
+            keyExtractor={m => m.id}
+            renderItem={({ item }) => <Bubble m={item} group={isGroup} onLong={onLong} />}
+            onScroll={onScroll}
+            scrollEventThrottle={100}
+            keyboardShouldPersistTaps="handled"
+            maintainVisibleContentPosition={{ minIndexForVisible: 1, autoscrollToTopThreshold: 80 }}
+            contentContainerStyle={{ paddingVertical: 10 }}
+          />
+          {unseen > 0 ? (
+            <Pressable onPress={() => toLatest()} accessibilityLabel="Jump to latest message"
+              style={{ position: 'absolute', right: 14, bottom: 12, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: t.c.primary, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 20, elevation: 4 }}>
+              <Icon name="arrowDown" size={16} color="#fff" />
+              <Text style={{ color: '#fff', fontWeight: '600' }}>{unseen} new</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      )}
+      {blocked ? (
+        <View style={{ padding: 14, paddingBottom: insets.bottom + 14, borderTopWidth: 1, borderTopColor: t.c.border, alignItems: 'center' }}>
+          <Text style={[t.font.small, { color: t.c.textDim, textAlign: 'center' }]}>You blocked this contact. They can't connect to you or message you.</Text>
+          <Button title="Unblock" kind="secondary" onPress={() => setBlocked(false)} style={{ marginTop: 10, alignSelf: 'stretch' }} />
+        </View>
+      ) : conv && !conv.active ? null : (
         <View style={{ flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 10, paddingTop: 8, paddingBottom: insets.bottom + 8, backgroundColor: t.c.bg, borderTopWidth: 1, borderTopColor: t.c.border }}>
           <Pressable onPress={attach} hitSlop={8} style={{ padding: 10 }} accessibilityLabel="Attach file"><Icon name="paperclip" color={t.c.textDim} /></Pressable>
           <TextInput value={text} onChangeText={setText} placeholder="Encrypted message" placeholderTextColor={t.c.textFaint} multiline maxLength={8000}

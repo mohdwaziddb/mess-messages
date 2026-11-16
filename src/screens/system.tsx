@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Text, View } from 'react-native';
+import { Alert, Pressable, Share, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   Avatar, Banner, Button, bytes, Card, Empty, Group, Header, Input, Pill, Row, Screen, SectionLabel, Stat, timeAgo, ToggleRow,
@@ -261,12 +261,31 @@ export function SettingsScreen({ navigation }: any) {
   const saveName = async () => {
     try { await Mesh.setMyName(editing ?? ''); setEditing(null); refreshState(); } catch (e) { Alert.alert('Name', errorMessage(e)); }
   };
+  const hasPhoto = !!state?.profile?.avatar;
+  const changePhoto = () => {
+    const pick = async () => {
+      try { const p = await Mesh.pickAvatar(); if (p) refreshState(); } catch (e) { Alert.alert('Profile photo', errorMessage(e)); }
+    };
+    const remove = async () => {
+      try { await Mesh.removeAvatar(); refreshState(); } catch (e) { Alert.alert('Profile photo', errorMessage(e)); }
+    };
+    Alert.alert('Profile photo', 'Shown only to people you connect with, sent end-to-end encrypted.', [
+      { text: hasPhoto ? 'Change photo' : 'Choose photo', onPress: pick },
+      ...(hasPhoto ? [{ text: 'Remove photo', style: 'destructive' as const, onPress: remove }] : []),
+      { text: 'Cancel', style: 'cancel' as const },
+    ]);
+  };
   return (
     <View style={{ flex: 1, backgroundColor: t.c.bg }}>
       <Header title="Settings" back={false} />
       <Screen>
         <Card style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Avatar id={state?.profile?.id ?? ''} name={state?.profile?.name ?? ''} size={56} />
+          <Pressable onPress={changePhoto} accessibilityRole="button" accessibilityLabel="Change profile photo" hitSlop={6}>
+            <Avatar id={state?.profile?.id ?? ''} name={state?.profile?.name ?? ''} uri={state?.profile?.avatar} size={56} />
+            <View style={{ position: 'absolute', right: -2, bottom: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: t.c.primary, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: t.c.surface }}>
+              <Icon name="plus" size={12} color="#fff" />
+            </View>
+          </Pressable>
           <View style={{ flex: 1, marginLeft: 12 }}>
             {editing !== null ? (
               <>
@@ -320,7 +339,10 @@ export function TroubleshootingScreen() {
   const t = useTheme();
   const { state, nearby, refreshState } = useMesh();
   const svc = useServiceToggle();
-  useEffect(() => { refreshState(); }, [refreshState]);
+  // Refresh every 2 s so the live radio numbers below move while the user watches.
+  useEffect(() => { refreshState(); const id = setInterval(() => refreshState(), 2000); return () => clearInterval(id); }, [refreshState]);
+  const radio = state?.radio;
+  const isXiaomi = /xiaomi|redmi|poco/i.test(state?.manufacturer ?? '');
   const checks: [string, boolean, string, (() => void) | undefined][] = [
     ['Bluetooth LE supported', !!state?.bleSupported, 'This phone has no Bluetooth LE. Offline Mesh cannot work here.', undefined],
     ['Bluetooth is on', !!state?.bleEnabled, 'Turn on Bluetooth (Airplane mode can stay on).', () => Mesh.openBluetoothSettings()],
@@ -328,7 +350,11 @@ export function TroubleshootingScreen() {
     ['Discovery service running', !!state?.serviceRunning, 'Start nearby discovery.', svc.start],
     ['Can advertise (be found)', !!state?.canAdvertise, 'This phone can scan but not advertise: others must find it from their side, or connect via QR from this phone.', undefined],
     ['Battery optimisation off', !state?.batteryOptimized, 'Some phones stop background Bluetooth. Exclude Offline Mesh from battery optimisation.', () => Mesh.openBatterySettings()],
+    ['Location is on', state?.locationEnabled !== false,
+      isXiaomi ? 'Xiaomi / Redmi / POCO phones often hide nearby Bluetooth phones while Location is off. Turn Location on (we never read it).'
+        : 'Some phones hide nearby Bluetooth devices while Location is off. Turn it on if nobody shows up (we never read it).', undefined],
   ];
+  const radioText = (v?: string) => (v === 'on' ? 'Working' : v === 'starting' ? 'Starting…' : v === 'hidden' ? 'Off (you chose hidden)' : v === 'off' || !v ? 'Off' : `Failed (${v.replace('failed:', 'code ')})`);
   return (
     <View style={{ flex: 1, backgroundColor: t.c.bg }}>
       <Header title="Troubleshooting" subtitle={`${state?.manufacturer ?? ''} · Android ${state?.androidVersion ?? ''}`} />
@@ -341,9 +367,27 @@ export function TroubleshootingScreen() {
         </Group>
         <SectionLabel>Live</SectionLabel>
         <Card>
-          <Text style={[t.font.body, { color: t.c.text }]}>Nearby devices seen: {nearby?.devices.length ?? 0}</Text>
+          <Text style={[t.font.body, { color: t.c.text }]}>Being found (advertising): {radioText(radio?.advertising)}</Text>
+          <Text style={[t.font.body, { color: t.c.text, marginTop: 4 }]}>Searching (scanning): {radioText(radio?.scanning)}</Text>
+          <Text style={[t.font.body, { color: t.c.text, marginTop: 4 }]}>Bluetooth signals heard: {radio?.bluetoothSignals ?? 0}</Text>
+          <Text style={[t.font.body, { color: t.c.text, marginTop: 4 }]}>Offline Mesh phones found: {radio?.meshPhonesSeen ?? 0}</Text>
+          <Text style={[t.font.body, { color: t.c.text, marginTop: 4 }]}>Nearby devices now: {nearby?.devices.length ?? 0}</Text>
           <Text style={[t.font.body, { color: t.c.text, marginTop: 4 }]}>Secure links: {nearby?.links ?? 0}</Text>
+          <Text style={[t.font.small, { color: t.c.textDim, marginTop: 10, lineHeight: 18 }]}>
+            {!state?.serviceRunning ? 'Discovery is off. Start it above.'
+              : (radio?.bluetoothSignals ?? 0) === 0 ? 'No Bluetooth signals at all: the phone is blocking scans. Check Location and the Nearby devices permission.'
+              : (radio?.meshPhonesSeen ?? 0) === 0 ? 'Bluetooth works, but no other Offline Mesh phone is visible. Check that the other phone shows "Being found: Working".'
+              : 'Other Offline Mesh phones are visible.'}
+          </Text>
         </Card>
+        <Button kind="secondary" icon="share" title="Share connection log" style={{ marginTop: 12 }}
+          onPress={async () => {
+            try { await Share.share({ title: 'Offline Mesh connection log', message: await Mesh.debugLog() }); }
+            catch (e) { Alert.alert('Connection log', errorMessage(e)); }
+          }} />
+        <Text style={[t.font.tiny, { color: t.c.textFaint, marginTop: 6, marginLeft: 4 }]}>
+          Contains only connection events and error codes: no messages, names or keys.
+        </Text>
         <SectionLabel>Tips</SectionLabel>
         <Card>
           {[

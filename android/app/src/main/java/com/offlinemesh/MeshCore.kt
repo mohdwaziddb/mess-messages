@@ -27,18 +27,35 @@ object MeshCore {
     var hardwareBackedKeys = false
         private set
 
+    // ---------------------------------------------------------------- diagnostics log
+    // In-memory only (never written to disk), last ~400 lines. Callers log ids/counts/status codes, never content or keys.
+    private val logLines = ArrayDeque<String>()
+    private val logTime = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
+
+    fun log(line: String) {
+        val stamped = synchronized(logTime) { logTime.format(java.util.Date()) } + " " + line
+        synchronized(logLines) {
+            logLines.addLast(stamped)
+            while (logLines.size > 400) logLines.removeFirst()
+        }
+    }
+
+    fun logText(): String = synchronized(logLines) { logLines.joinToString("\n") }
+
     /** (kind, id) change listeners: RN bridge, notifications. Called on the engine thread. */
     val listeners = CopyOnWriteArraySet<(String, String?) -> Unit>()
 
     fun init(context: Context) {
         if (::appContext.isInitialized) return
         appContext = context.applicationContext
-        exec.execute { open() }
+        exec.execute { runCatching { open() }.onFailure { log("storage open FAILED: ${it.javaClass.simpleName}: ${it.message}") } }
         exec.scheduleWithFixedDelay({ runCatching { engine?.tick() }.onFailure { Log.w(TAG, "tick failed: ${it.javaClass.simpleName}") } },
             10, 10, TimeUnit.SECONDS)
     }
 
     private fun open() {
+        // Decrypted copies made for "Open" are temporary: never keep them across app starts.
+        runCatching { File(appContext.cacheDir, "open").deleteRecursively() }
         val wrap = KeyWrap(appContext)
         val dbKey = wrap.secret("db")
         val fileKey = wrap.secret("files")
@@ -49,6 +66,8 @@ object MeshCore {
         Schema.migrate(sql)
         blobs = EncryptedBlobStore(File(appContext.noBackupFilesDir, "attachments"), fileKey)
         engine = Engine(sql, blobs, { kind, id -> listeners.forEach { l -> runCatching { l(kind, id) } } })
+            .also { it.logger = { line -> log("engine $line") } }
+        log("storage open, hardwareKeys=$hardwareBackedKeys, android=${android.os.Build.VERSION.SDK_INT}, ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
     }
 
     /** Run [block] on the engine thread. */

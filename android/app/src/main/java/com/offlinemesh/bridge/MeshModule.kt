@@ -67,6 +67,15 @@ class MeshModule(private val rc: ReactApplicationContext) : ReactContextBaseJava
                     pendingPick = null
                     p.resolve(if (resultCode == Activity.RESULT_OK) data?.data?.toString() else null)
                 }
+                REQ_AVATAR -> pendingAvatar?.let { p ->
+                    pendingAvatar = null
+                    val uri = data?.data
+                    if (resultCode != Activity.RESULT_OK || uri == null) { p.resolve(null); return@let }
+                    try {
+                        val jpeg = avatarThumbnail(uri)
+                        call(p) { e -> e.setMyAvatar(jpeg); e.profile() }
+                    } catch (ex: Exception) { p.reject("E_MESH", "Could not use this photo: ${ex.message ?: ex.javaClass.simpleName}") }
+                }
             }
         }
     }
@@ -74,7 +83,11 @@ class MeshModule(private val rc: ReactApplicationContext) : ReactContextBaseJava
     companion object {
         private const val REQ_SCAN = 4101
         private const val REQ_PICK = 4102
+        private const val REQ_AVATAR = 4103
+        private const val AVATAR_PX = 256
     }
+
+    private var pendingAvatar: Promise? = null
 
     private val changeListener: (String, String?) -> Unit = { kind, id ->
         emit("mesh:change", Arguments.createMap().apply { putString("kind", kind); putString("id", id) })
@@ -165,11 +178,73 @@ class MeshModule(private val rc: ReactApplicationContext) : ReactContextBaseJava
             "androidVersion" to Build.VERSION.SDK_INT,
             "manufacturer" to Build.MANUFACTURER,
             "stats" to e.stats(),
+            "locationEnabled" to runCatching {
+                val lm = rc.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+                if (Build.VERSION.SDK_INT >= 28) lm.isLocationEnabled
+                else @Suppress("DEPRECATION") lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+            }.getOrDefault(true),
+            "radio" to (t?.diagnostics() ?: mapOf("advertising" to "off", "scanning" to "off", "bluetoothSignals" to 0, "meshPhonesSeen" to 0)),
         )
     }
 
     @ReactMethod fun createIdentity(name: String, p: Promise) = call(p) { e -> e.createIdentity(name); e.profile() }
     @ReactMethod fun setMyName(name: String, p: Promise) = call(p) { e -> e.setMyName(name); e.profile() }
+
+    /** Opens the photo picker; the chosen image is cropped to a small square JPEG on-device and shared only over E2E sessions. */
+    @ReactMethod fun pickAvatar(p: Promise) {
+        val act = rc.currentActivity ?: return p.reject("E_UI", "No activity")
+        pendingAvatar?.resolve(null)
+        pendingAvatar = p
+        act.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*"), REQ_AVATAR)
+    }
+
+    @ReactMethod fun removeAvatar(p: Promise) = call(p) { e -> e.setMyAvatar(null); e.profile() }
+
+    /** Center-cropped, EXIF-rotated, AVATAR_PX square JPEG under the protocol limit. */
+    private fun avatarThumbnail(uri: Uri): ByteArray {
+        val cr = rc.contentResolver
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IllegalArgumentException("not an image")
+        var sample = 1
+        while (minOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= AVATAR_PX) sample *= 2
+        val src = cr.openInputStream(uri)?.use {
+            android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+        } ?: throw IllegalArgumentException("not an image")
+        val degrees = runCatching {
+            cr.openInputStream(uri)?.use { s ->
+                when (android.media.ExifInterface(s).getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1)) {
+                    android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } ?: 0f
+        }.getOrDefault(0f)
+        val side = minOf(src.width, src.height)
+        val m = android.graphics.Matrix().apply {
+            val s = AVATAR_PX.toFloat() / side
+            postScale(s, s); postRotate(degrees)
+        }
+        val out = android.graphics.Bitmap.createBitmap(src, (src.width - side) / 2, (src.height - side) / 2, side, side, m, true)
+        var quality = 85
+        while (true) {
+            val bytes = java.io.ByteArrayOutputStream().also { out.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, it) }.toByteArray()
+            if (bytes.size <= com.offlinemesh.core.proto.Content.MAX_AVATAR - 1024 || quality <= 40) return bytes
+            quality -= 15
+        }
+    }
+
+    // ------------------------------------------------------------------ diagnostics
+
+    /** Recent connection log (ids, status codes, counts only). Shared by the user from Troubleshooting. */
+    @ReactMethod fun debugLog(p: Promise) {
+        val t = MeshService.transport
+        val header = "Offline Mesh ${runCatching { rc.packageManager.getPackageInfo(rc.packageName, 0).versionName }.getOrNull()} · " +
+            "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.SDK_INT}\n" +
+            "radio: ${t?.diagnostics() ?: "service off"}\n\n"
+        p.resolve(header + MeshCore.logText())
+    }
 
     // ------------------------------------------------------------------ service / transport
 
@@ -193,7 +268,9 @@ class MeshModule(private val rc: ReactApplicationContext) : ReactContextBaseJava
     @ReactMethod fun setAppForeground(fg: Boolean) { MeshService.appInForeground = fg }
 
     @ReactMethod fun nearby(p: Promise) = call(p) { e ->
-        val t = MeshService.transport ?: return@call emptyList<Any>()
+        // Service not running yet (first launch, before permissions): return the same shape with nothing in it.
+        val t = MeshService.transport ?: return@call mapOf("people" to emptyList<Any>(), "devices" to emptyList<Any>(),
+            "links" to 0, "linkedAddresses" to 0, "scanning" to false, "visible" to false)
         val connected = e.connectedPeerIds().toSet()
         val contacts = e.contacts().associateBy { it["id"] as String }
         // Authenticated links are shown as people; raw discoveries as "nearby device" until the handshake completes.
@@ -232,6 +309,7 @@ class MeshModule(private val rc: ReactApplicationContext) : ReactContextBaseJava
     @ReactMethod fun deleteMessage(msgId: String, p: Promise) = call(p) { it.deleteMessage(msgId); true }
     @ReactMethod fun clearConversation(convId: String, p: Promise) = call(p) { it.clearConversation(convId); true }
     @ReactMethod fun markRead(convId: String, p: Promise) = call(p) { it.markRead(convId); true }
+    @ReactMethod fun setPinned(convId: String, pinned: Boolean, p: Promise) = call(p) { it.setPinned(convId, pinned); true }
 
     @ReactMethod fun sendFile(convId: String, uri: String, p: Promise) {
         try {
@@ -256,6 +334,25 @@ class MeshModule(private val rc: ReactApplicationContext) : ReactContextBaseJava
         val data = e.readAttachment(msgId) ?: return@call null
         val mime = e.db.query("SELECT mime FROM attachments WHERE id=?", msgId).firstOrNull()?.str("mime") ?: "application/octet-stream"
         "data:$mime;base64," + Base64.encodeToString(data, Base64.NO_WRAP)
+    }
+
+    /**
+     * Explicit user action: open a received/sent file in another app (PDF viewer, gallery, …).
+     * A decrypted copy goes to this app's private cache (not shared storage) and is shared read-only via FileProvider;
+     * old copies are deleted on the next start ([MeshCore]).
+     */
+    @ReactMethod fun openAttachment(msgId: String, p: Promise) = call(p) { e ->
+        val data = e.readAttachment(msgId) ?: throw EngineException("File not available yet")
+        val row = e.db.query("SELECT name, mime FROM attachments WHERE id=?", msgId).first()
+        val name = row.str("name").replace(Regex("[\\\\/:*?\"<>|]"), "_").ifEmpty { "file" }
+        val dir = File(rc.cacheDir, "open").apply { mkdirs() }
+        val f = File(dir, name).apply { writeBytes(data) }
+        val uri = androidx.core.content.FileProvider.getUriForFile(rc, "${rc.packageName}.files", f)
+        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, row.str("mime"))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        try { rc.startActivity(Intent.createChooser(view, "Open with").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
+        catch (ex: android.content.ActivityNotFoundException) { throw EngineException("No app on this phone can open this file type. Use Download instead.") }
+        true
     }
 
     /** Explicit user action: export a decrypted copy to Downloads. */

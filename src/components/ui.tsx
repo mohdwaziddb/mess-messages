@@ -1,16 +1,22 @@
 import React, { useEffect, useRef } from 'react';
 import {
-  ActivityIndicator, Animated, Pressable, ScrollView, StatusBar, StyleProp, StyleSheet, Switch, Text, TextInput,
+  ActivityIndicator, Animated, Image, Pressable, ScrollView, StatusBar, StyleProp, StyleSheet, Switch, Text, TextInput,
   TextInputProps, View, ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
+import { BottomTabBarHeightContext } from '@react-navigation/bottom-tabs';
 import { avatarColor, Theme, useTheme } from '../theme/theme';
 import { Icon, IconName } from './Icon';
 
 export function Screen({ children, scroll = true, padded = true, style }: { children: React.ReactNode; scroll?: boolean; padded?: boolean; style?: StyleProp<ViewStyle> }) {
   const t = useTheme();
-  const inner = padded ? { paddingHorizontal: 18, paddingBottom: 32 } : null;
+  const insets = useSafeAreaInsets();
+  // Inside the tab navigator the tab bar already clears the system navigation bar; elsewhere leave room
+  // for it so the last button is never hidden behind the 3-button bar.
+  const inTabs = React.useContext(BottomTabBarHeightContext) !== undefined;
+  const bottom = 32 + (inTabs ? 0 : insets.bottom);
+  const inner = padded ? { paddingHorizontal: 18, paddingBottom: bottom } : { paddingBottom: inTabs ? 0 : insets.bottom };
   return (
     <View style={[{ flex: 1, backgroundColor: t.c.bg }, style]}>
       <StatusBar barStyle={t.dark ? "light-content" : "dark-content"} />
@@ -88,15 +94,22 @@ export function SectionLabel({ children }: { children: React.ReactNode }) {
   return <Text style={[t.font.tiny, { color: t.c.textFaint, textTransform: 'uppercase', marginTop: 22, marginBottom: 8, marginLeft: 4 }]}>{children}</Text>;
 }
 
-export function Avatar({ id, name, size = 44, online }: { id: string; name: string; size?: number; online?: boolean }) {
+export function Avatar({ id, name, size = 44, online, uri }: { id: string; name: string; size?: number; online?: boolean; uri?: string | null }) {
   const t = useTheme();
   const initials = (name || '?').trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
   const col = avatarColor(id);
+  const [broken, setBroken] = React.useState(false);
+  React.useEffect(() => setBroken(false), [uri]);
   return (
     <View style={{ width: size, height: size }}>
-      <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: col + '33', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: col + '88' }}>
-        <Text style={{ color: col, fontWeight: '700', fontSize: size * 0.38 }}>{initials}</Text>
-      </View>
+      {uri && !broken ? (
+        <Image source={{ uri }} onError={() => setBroken(true)} accessibilityLabel={`${name} profile photo`}
+          style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: t.c.surface2 }} />
+      ) : (
+        <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: col + '33', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: col + '88' }}>
+          <Text style={{ color: col, fontWeight: '700', fontSize: size * 0.38 }}>{initials}</Text>
+        </View>
+      )}
       {online !== undefined ? (
         <View style={{ position: 'absolute', right: -1, bottom: -1, width: size * 0.3, height: size * 0.3, borderRadius: size, backgroundColor: online ? t.c.success : t.c.textFaint, borderWidth: 2, borderColor: t.c.bg }} />
       ) : null}
@@ -222,14 +235,25 @@ export function FadeIn({ children, delay = 0, style }: { children: React.ReactNo
   return <Animated.View style={[style, { opacity: v, transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }] }]}>{children}</Animated.View>;
 }
 
-export function Stat({ label, value, icon, tone }: { label: string; value: string | number; icon: IconName; tone?: string }) {
+export function Stat({ label, value, icon, tone, onPress }: { label: string; value: string | number; icon: IconName; tone?: string; onPress?: () => void }) {
   const t = useTheme();
-  return (
-    <View style={{ flex: 1, backgroundColor: t.c.surface, borderRadius: t.radius.md, padding: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: t.c.border }}>
-      <Icon name={icon} size={18} color={tone ?? t.c.primary} />
+  const body = (
+    <>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <Icon name={icon} size={18} color={tone ?? t.c.primary} />
+        {onPress ? <View style={{ marginLeft: 'auto' }}><Icon name="chevron" size={16} color={t.c.textFaint} /></View> : null}
+      </View>
       <Text style={{ color: t.c.text, fontSize: 22, fontWeight: '700', marginTop: 8 }}>{value}</Text>
       <Text style={[t.font.small, { color: t.c.textDim }]}>{label}</Text>
-    </View>
+    </>
+  );
+  const box = { flex: 1, backgroundColor: t.c.surface, borderRadius: t.radius.md, padding: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: t.c.border };
+  if (!onPress) return <View style={box}>{body}</View>;
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${label}: ${value}`}
+      style={({ pressed }) => [box, { opacity: pressed ? 0.75 : 1 }]}>
+      {body}
+    </Pressable>
   );
 }
 

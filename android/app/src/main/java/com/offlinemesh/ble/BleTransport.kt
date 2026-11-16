@@ -100,8 +100,9 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
         running = false
         housekeepingTask?.cancel(false)
         housekeepingTask = null
-        runCatching { adapter?.bluetoothLeScanner?.stopScan(scanCb) }
-        runCatching { adapter?.bluetoothLeAdvertiser?.stopAdvertising(advCb) }
+        stopScans()
+        stopAdvertising()
+        advState = "off"
         links.values.forEach { it.close() }
         links.clear()
         runCatching { server?.close() }
@@ -110,13 +111,15 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
         onNearbyChanged()
     }
 
-    fun restartScan() { if (running) { runCatching { adapter?.bluetoothLeScanner?.stopScan(scanCb) }; startScan() } }
+    fun restartScan() { if (running) { stopScans(); startScan() } }
 
     fun setVisible(visible: Boolean) {
+        // Already advertising (or about to) as asked: don't stop/restart, which races on some stacks.
+        if (visible && discoverable && running && (advState == "on" || advState == "starting")) return
         discoverable = visible
         if (!running) return
-        runCatching { adapter?.bluetoothLeAdvertiser?.stopAdvertising(advCb) }
-        if (visible) startAdvertising()
+        stopAdvertising()
+        if (visible) startAdvertising() else advState = "hidden"
     }
 
     private fun housekeeping() {
@@ -129,7 +132,10 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
             changed = changed || gone
             gone
         }
-        links.values.filter { !it.ready && now - it.createdAt > CONNECT_TIMEOUT_MS }.forEach { it.close() }
+        links.values.filter { !it.ready && now - it.createdAt > CONNECT_TIMEOUT_MS }.forEach { l ->
+            // Never tear down a physical connection that our own client link to the same phone is using.
+            if (l is PeripheralLink && links.containsKey("c:${l.address}")) { links.remove(l.id); l.closed = true } else l.close()
+        }
         if (autoConnect) nearby.values.filter { it.state == "discovered" }.forEach { maybeConnect(it) }
         if (changed) onNearbyChanged()
     }
@@ -139,21 +145,43 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
         if (!force && now - rotatedAt < ROTATE_MS) return
         ephemeralId = Crypto.randomBytes(8)
         rotatedAt = now
-        runCatching { adapter?.bluetoothLeAdvertiser?.stopAdvertising(advCb) }
+        stopAdvertising()
         if (discoverable) startAdvertising()
     }
 
+    // =========================================================================== diagnostics
+
+    /** Human-checkable radio state, shown on the Troubleshooting screen. */
+    @Volatile var advState = "off"; private set      // off | starting | on | hidden | failed:<code>
+    @Volatile var scanState = "off"; private set     // off | on | failed:<code>
+    private val rawSeen = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var meshSeenTotal = 0
+
+    fun diagnostics(): Map<String, Any?> = mapOf(
+        "advertising" to advState,
+        "scanning" to scanState,
+        "bluetoothSignals" to rawSeen.size,
+        "meshPhonesSeen" to meshSeenTotal,
+    )
+
     // =========================================================================== advertising
 
-    private val advCb = object : AdvertiseCallback() {
-        override fun onStartFailure(errorCode: Int) { Log.w(TAG, "advertise failed $errorCode") }
+    // A fresh callback per start: reusing one callback across a quick stop/start makes some stacks
+    // reject the second start (ALREADY_STARTED) after the first was stopped, leaving us invisible.
+    @Volatile private var advCb: AdvertiseCallback? = null
+    @Volatile private var advRetried = false
+
+    private fun stopAdvertising() {
+        val cb = advCb ?: return
+        advCb = null
+        runCatching { adapter?.bluetoothLeAdvertiser?.stopAdvertising(cb) }
     }
 
     private fun startAdvertising() {
-        val adv = adapter?.bluetoothLeAdvertiser ?: return
+        val adv = adapter?.bluetoothLeAdvertiser ?: run { advState = "failed:no-advertiser"; return }
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(if (lowPower) AdvertiseSettings.ADVERTISE_MODE_BALANCED else AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .setTxPowerLevel(if (advRetried) AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM else AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .setConnectable(true)
             .setTimeout(0)
             .build()
@@ -162,27 +190,71 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
             .setIncludeTxPowerLevel(false)
             .addServiceData(ParcelUuid(SERVICE), ephemeralId)
             .build()
-        runCatching { adv.startAdvertising(settings, data, advCb) }.onFailure { Log.w(TAG, "advertise: ${it.javaClass.simpleName}") }
+        val cb = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                if (advCb === this) { advState = "on"; advRetried = false; MeshCore.log("ble advertising on") }
+            }
+            override fun onStartFailure(errorCode: Int) {
+                Log.w(TAG, "advertise failed $errorCode")
+                MeshCore.log("ble advertising failed code=$errorCode")
+                if (advCb !== this) return
+                advState = "failed:$errorCode"
+                advCb = null
+                // One delayed retry with gentler settings (busy controller / too many advertisers).
+                if (!advRetried && running && discoverable) {
+                    advRetried = true
+                    MeshCore.exec.schedule({ if (running && discoverable && advCb == null) startAdvertising() }, 2, TimeUnit.SECONDS)
+                }
+            }
+        }
+        advCb = cb
+        advState = "starting"
+        runCatching { adv.startAdvertising(settings, data, cb) }.onFailure {
+            Log.w(TAG, "advertise: ${it.javaClass.simpleName}")
+            advCb = null
+            advState = "failed:${it.javaClass.simpleName}"
+        }
     }
 
     // =========================================================================== scanning
 
-    private val scanCb = object : ScanCallback() {
+    /** Hardware-filtered scan: keeps working with the screen off, but some chipsets drop 128-bit service-data filters. */
+    private val filteredCb = scanCallback("filtered")
+    /** Unfiltered scan, matched in software by [onResult]: works on every chipset (Android pauses it with the screen off). */
+    private val openCb = scanCallback("open")
+
+    private fun scanCallback(name: String) = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = onResult(result)
         override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach { onResult(it) }
-        override fun onScanFailed(errorCode: Int) { Log.w(TAG, "scan failed $errorCode") }
+        override fun onScanFailed(errorCode: Int) {
+            Log.w(TAG, "$name scan failed $errorCode")
+            MeshCore.log("ble $name scan failed code=$errorCode")
+            // ALREADY_STARTED (1) means it is in fact running.
+            if (errorCode != SCAN_FAILED_ALREADY_STARTED) scanState = "failed:$errorCode"
+        }
+    }
+
+    private fun stopScans() {
+        val scanner = adapter?.bluetoothLeScanner
+        runCatching { scanner?.stopScan(filteredCb) }
+        runCatching { scanner?.stopScan(openCb) }
+        scanState = "off"
     }
 
     private fun startScan() {
-        val scanner = adapter?.bluetoothLeScanner ?: return
+        val scanner = adapter?.bluetoothLeScanner ?: run { scanState = "failed:no-scanner"; return }
+        val mode = if (lowPower) ScanSettings.SCAN_MODE_BALANCED else ScanSettings.SCAN_MODE_LOW_LATENCY
+        val settings = ScanSettings.Builder().setScanMode(mode).build()
         val filter = ScanFilter.Builder().setServiceData(ParcelUuid(SERVICE), ByteArray(0)).build()
-        val settings = ScanSettings.Builder()
-            .setScanMode(if (lowPower) ScanSettings.SCAN_MODE_BALANCED else ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
-        runCatching { scanner.startScan(listOf(filter), settings, scanCb) }.onFailure { Log.w(TAG, "scan: ${it.javaClass.simpleName}") }
+        scanState = "on"
+        runCatching { scanner.startScan(listOf(filter), settings, filteredCb) }
+            .onFailure { Log.w(TAG, "filtered scan: ${it.javaClass.simpleName}"); scanState = "failed:${it.javaClass.simpleName}" }
+        runCatching { scanner.startScan(null, settings, openCb) }
+            .onFailure { Log.w(TAG, "open scan: ${it.javaClass.simpleName}") }
     }
 
     private fun onResult(r: ScanResult) {
+        if (rawSeen.size < 1000) rawSeen.add(r.device.address)
         val eph = r.scanRecord?.getServiceData(ParcelUuid(SERVICE)) ?: return
         if (eph.size != 8 || eph.contentEquals(ephemeralId)) return
         val now = System.currentTimeMillis()
@@ -192,6 +264,7 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
         nearby.entries.removeIf { it.key != addr && it.value.ephemeralId == hex && it.value.linkId == null }
         val n = nearby.getOrPut(addr) { Nearby(addr, hex, r.rssi, now, now, "discovered") }
         val isNew = n.lastSeen == now && n.firstSeen == now
+        if (isNew) meshSeenTotal++
         n.ephemeralId = hex; n.rssi = r.rssi; n.lastSeen = now
         if (qrTarget == hex) maybeConnect(n, force = true)
         else if (autoConnect && isNew) maybeConnect(n)
@@ -205,6 +278,8 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
         if (!running || n.state != "discovered") return
         if (links.values.any { it.address == n.address }) return
         if (links.size >= MAX_LINKS) return
+        // Already linked to this phone (e.g. it dialed us): a second link only adds a duplicate to resolve.
+        if (links.values.any { it.ready && it.address == n.address }) return
         if (!force) {
             // Halve duplicate dials: the smaller ephemeral id dials immediately, the other waits.
             val iDialFirst = Hex.enc(ephemeralId) < n.ephemeralId
@@ -213,6 +288,7 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
         }
         val device = adapter?.getRemoteDevice(n.address) ?: return
         n.state = "connecting"
+        MeshCore.log("ble dial ${n.address.takeLast(5)} force=$force rssi=${n.rssi}")
         val link = CentralLink(device)
         links[link.id] = link
         n.linkId = link.id
@@ -245,7 +321,9 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
                 next = queue.removeFirstOrNull() ?: return
                 busy = true
             }
-            if (!write(next)) { synchronized(this) { busy = false }; close() }
+            // A throwing radio call must never escape into the engine (it would stall retries); treat it as a failed write.
+            val ok = try { write(next) } catch (e: Exception) { MeshCore.log("ble $id write threw ${e.javaClass.simpleName}: ${e.message}"); false }
+            if (!ok) { MeshCore.log("ble $id write failed (${next.size} B), closing"); synchronized(this) { busy = false }; close() }
         }
 
         protected fun onWriteDone() { synchronized(this) { busy = false }; pump() }
@@ -255,6 +333,7 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
         protected fun becameReady() {
             if (ready) return
             ready = true
+            MeshCore.log("ble $id ready mtu=$mtu")
             nearby[address]?.let { it.state = "connected"; it.linkId = id }
             onNearbyChanged()
             MeshCore.post { it.linkUp(this) }
@@ -266,7 +345,13 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
         protected fun closedByRemote() {
             if (links.remove(id) == null) return
             closed = true
-            nearby[address]?.let { it.state = "discovered"; it.linkId = null; it.lastSeen = System.currentTimeMillis() }
+            MeshCore.log("ble $id closed")
+            nearby[address]?.let {
+                // Another link to the same phone may still be up (two links can share one connection).
+                val other = links.values.firstOrNull { l -> l.address == address && l.ready }
+                if (other != null) { it.state = "connected"; it.linkId = other.id }
+                else { it.state = "discovered"; it.linkId = null; it.lastSeen = System.currentTimeMillis() }
+            }
             onNearbyChanged()
             MeshCore.post { it.linkDown(id) }
         }
@@ -286,6 +371,7 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
 
         private val cb = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                MeshCore.log("ble $id client state=$newState status=$status")
                 if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                     g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
                     if (!g.requestMtu(517)) g.discoverServices()
@@ -297,6 +383,7 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
 
             override fun onMtuChanged(g: BluetoothGatt, m: Int, status: Int) {
                 if (status == BluetoothGatt.GATT_SUCCESS) mtu = m
+                MeshCore.log("ble $id mtu=$m status=$status")
                 g.discoverServices()
             }
 
@@ -304,7 +391,7 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
                 val svc = g.getService(SERVICE)
                 val tx = svc?.getCharacteristic(TX)
                 rx = svc?.getCharacteristic(RX)
-                if (tx == null || rx == null) { close(); return }
+                if (tx == null || rx == null) { MeshCore.log("ble $id service missing (status=$status)"); close(); return }
                 g.setCharacteristicNotification(tx, true)
                 val d = tx.getDescriptor(CCCD) ?: run { close(); return }
                 if (Build.VERSION.SDK_INT >= 33) g.writeDescriptor(d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
@@ -312,11 +399,11 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
             }
 
             override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
-                if (status == BluetoothGatt.GATT_SUCCESS) becameReady() else close()
+                if (status == BluetoothGatt.GATT_SUCCESS) becameReady() else { MeshCore.log("ble $id notify-enable failed status=$status"); close() }
             }
 
             override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-                if (status == BluetoothGatt.GATT_SUCCESS) onWriteDone() else close()
+                if (status == BluetoothGatt.GATT_SUCCESS) onWriteDone() else { MeshCore.log("ble $id write status=$status"); close() }
             }
 
             override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
@@ -372,7 +459,11 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
 
         override fun close() {
             closed = true
-            runCatching { server?.cancelConnection(device) }
+            // Our own client link to the same phone rides on the same physical connection. Cancelling it here
+            // would also kill that link (this is what broke one direction after duplicate-link resolution).
+            val shared = links.values.any { it !== this && it.address == address }
+            if (!shared) runCatching { server?.cancelConnection(device) }
+            MeshCore.log("ble $id close (shared connection kept=$shared)")
             closedByRemote()
         }
     }
@@ -393,25 +484,41 @@ class BleTransport(private val ctx: Context, private val onNearbyChanged: () -> 
 
     private fun peripheral(device: BluetoothDevice) = links["p:${device.address}"] as? PeripheralLink
 
+    /** Server-side MTU per phone: it can be reported before the peripheral link exists (created on notify-enable). */
+    private val serverMtu = ConcurrentHashMap<String, Int>()
+
+    private fun newPeripheral(device: BluetoothDevice) = PeripheralLink(device).also { l ->
+        serverMtu[device.address]?.let { l.mtu = it }
+        links[l.id] = l
+    }
+
     private val serverCb = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            MeshCore.log("ble server ${device.address.takeLast(5)} state=$newState status=$status")
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                // Android reports every LE connection to the GATT server, including the ones *we* dialed as a
+                // client. Treating those as inbound created a phantom link that timed out after 15 s and then
+                // cancelled the shared connection, killing our real client link. Ignore them.
+                if (links.containsKey("c:${device.address}")) return
                 if (links.size >= MAX_LINKS) { server?.cancelConnection(device); return }
                 lastInboundAt = System.currentTimeMillis()
-                val l = PeripheralLink(device)
-                links[l.id] = l
+                if (peripheral(device) == null) newPeripheral(device)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                serverMtu.remove(device.address)
                 peripheral(device)?.remoteClosed()
             }
         }
 
-        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) { peripheral(device)?.mtu = mtu }
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            serverMtu[device.address] = mtu
+            peripheral(device)?.mtu = mtu
+        }
 
         override fun onDescriptorWriteRequest(device: BluetoothDevice, requestId: Int, d: BluetoothGattDescriptor,
                                               preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?) {
             if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             if (d.uuid == CCCD && value != null && value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
-                val l = peripheral(device) ?: PeripheralLink(device).also { links[it.id] = it }
+                val l = peripheral(device) ?: newPeripheral(device)
                 l.ready()
             }
         }

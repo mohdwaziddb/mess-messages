@@ -5,7 +5,7 @@ import { NativeEventEmitter, NativeModules, PermissionsAndroid, Platform } from 
  * The JS layer only ever sees public data: no private keys, no ciphertext handling.
  */
 
-export type Profile = { id: string; name: string; fingerprint: string; createdAt?: number | null };
+export type Profile = { id: string; name: string; fingerprint: string; createdAt?: number | null; avatar?: string | null };
 
 export type Stats = {
   connected: number;
@@ -38,6 +38,9 @@ export type MeshState = {
   androidVersion: number;
   manufacturer: string;
   stats: Stats;
+  locationEnabled?: boolean;
+  /** Live radio diagnostics (Troubleshooting screen). Optional: older native builds don't send it. */
+  radio?: { advertising: string; scanning: string; bluetoothSignals: number; meshPhonesSeen: number };
 };
 
 export type Contact = {
@@ -51,6 +54,7 @@ export type Contact = {
   firstSeen: number;
   connected: boolean;
   fingerprint: string;
+  avatar?: string | null;
 };
 
 export type NearbyDevice = { type: 'device'; address: string; ephemeralId: string; rssi: number; state: string; lastSeen: number };
@@ -75,6 +79,9 @@ export type Conversation = {
   identityWarning: boolean;
   connected: boolean;
   active: boolean;
+  pinned?: boolean;
+  blocked?: boolean;
+  avatar?: string | null;
 };
 
 export type MessageStatus = 'pending' | 'sent' | 'delivered' | 'read' | 'failed' | 'received' | 'receiving';
@@ -109,6 +116,11 @@ type Native = {
   getState(): Promise<MeshState>;
   createIdentity(name: string): Promise<Profile>;
   setMyName(name: string): Promise<Profile>;
+  pickAvatar(): Promise<Profile | null>;
+  removeAvatar(): Promise<Profile>;
+  debugLog(): Promise<string>;
+  setPinned(convId: string, pinned: boolean): Promise<boolean>;
+  openAttachment(id: string): Promise<boolean>;
   requiredPermissions(): Promise<string[]>;
   startService(): Promise<boolean>;
   stopService(): Promise<boolean>;

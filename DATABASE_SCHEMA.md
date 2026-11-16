@@ -24,6 +24,15 @@
 | `settings` | Preferences | |
 | `used_qr_tokens` | QR replay protection | |
 
+## V2 (app 0.1.5)
+
+| Change | Purpose |
+|---|---|
+| `conversations.pinned` | Pinned chats are listed first |
+| `contacts.avatar` | Contact's profile photo (small JPEG/PNG received over the E2E session) |
+
+Your own photo is kept in `settings` (`my_avatar`), inside the same encrypted database. Upgrading from V1 keeps all data (`FeaturesTest.upgradeFromV1KeepsDataAndAddsColumns`).
+
 ## Data minimisation
 
 - **Not stored:** phone numbers, emails, location, or Bluetooth addresses of peers. Nearby discovery state is kept only in memory.

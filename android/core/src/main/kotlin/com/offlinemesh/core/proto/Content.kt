@@ -31,6 +31,9 @@ sealed class Content {
     /** Sent by a QR scanner to prove it read the one-time token shown on the other screen. */
     data class QrClaim(val token: ByteArray) : Content()
 
+    /** The sender's profile photo (small JPEG/PNG), or empty to remove it. Travels only inside the E2E session. */
+    class Avatar(val image: ByteArray) : Content()
+
     companion object {
         const val RECEIPT_DELIVERED = 1
         const val RECEIPT_READ = 2
@@ -49,6 +52,10 @@ sealed class Content {
         private const val T_ATTACHMENT = 7
         private const val T_ATTACHMENT_CHUNK = 8
         private const val T_QR_CLAIM = 9
+        private const val T_AVATAR = 10
+
+        /** Profile photos are small square JPEG/PNG thumbnails; empty = photo removed. */
+        const val MAX_AVATAR = 64 * 1024
 
         fun encode(c: Content): ByteArray {
             val w = WireWriter(256)
@@ -64,9 +71,16 @@ sealed class Content {
                 is AttachmentChunk -> w.u8(T_ATTACHMENT_CHUNK).str(c.groupId).u32(c.epoch.toLong()).str(c.msgId)
                     .u32(c.index.toLong()).bytes32(c.data)
                 is QrClaim -> w.u8(T_QR_CLAIM).bytes16(c.token)
+                is Avatar -> w.u8(T_AVATAR).bytes32(c.image)
             }
             return w.toByteArray()
         }
+
+        /** JPEG (FF D8 FF) or PNG (89 50 4E 47) magic: anything else is rejected, not rendered. */
+        fun isImage(b: ByteArray) = (b.size > 3 && b[0] == 0xFF.toByte() && b[1] == 0xD8.toByte() && b[2] == 0xFF.toByte()) ||
+            (b.size > 4 && b[0] == 0x89.toByte() && b[1] == 0x50.toByte() && b[2] == 0x4E.toByte() && b[3] == 0x47.toByte())
+
+        fun mimeOf(b: ByteArray) = if (b.isNotEmpty() && b[0] == 0x89.toByte()) "image/png" else "image/jpeg"
 
         fun decode(b: ByteArray): Content {
             val r = WireReader(b)
@@ -90,6 +104,7 @@ sealed class Content {
                 }
                 T_ATTACHMENT_CHUNK -> AttachmentChunk(r.str(64), r.u32().toInt(), r.str(64), r.u32().toInt(), r.bytes32(ATTACHMENT_CHUNK))
                 T_QR_CLAIM -> QrClaim(r.bytes16()).also { if (it.token.size != 16) throw MalformedException("qr token") }
+                T_AVATAR -> Avatar(r.bytes32(MAX_AVATAR)).also { if (it.image.isNotEmpty() && !isImage(it.image)) throw MalformedException("avatar format") }
                 else -> throw MalformedException("unknown content type")
             }
             r.expectEnd()

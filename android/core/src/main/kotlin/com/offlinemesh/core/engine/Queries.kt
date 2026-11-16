@@ -2,6 +2,7 @@ package com.offlinemesh.core.engine
 
 import com.offlinemesh.core.crypto.Crypto
 import com.offlinemesh.core.db.one
+import com.offlinemesh.core.proto.Content
 import org.signal.libsignal.protocol.IdentityKey
 
 /** Read-only views for the UI. Only public data leaves the engine (never key material). */
@@ -11,7 +12,12 @@ fun Engine.profile(): Map<String, Any?> = mapOf(
     "name" to myName,
     "fingerprint" to Crypto.displayFingerprint(myIdentity),
     "createdAt" to db.one("SELECT MIN(at) AS t FROM security_events WHERE kind='identity_created'")?.longOrNull("t"),
+    "avatar" to avatarUri(myAvatar),
 )
+
+/** Profile photos go to the UI as data URIs (they are small thumbnails). */
+internal fun avatarUri(b: ByteArray?): String? =
+    b?.takeIf { it.isNotEmpty() }?.let { "data:${Content.mimeOf(it)};base64," + java.util.Base64.getEncoder().encodeToString(it) }
 
 fun Engine.contacts(): List<Map<String, Any?>> {
     val online = connectedPeerIds().toSet()
@@ -27,15 +33,17 @@ fun Engine.contacts(): List<Map<String, Any?>> {
             "firstSeen" to it.long("first_seen"),
             "connected" to (it.str("id") in online),
             "fingerprint" to Crypto.displayFingerprint(IdentityKey(it.blob("identity_key"))),
+            "avatar" to avatarUri(it.blobOrNull("avatar")),
         )
     }
 }
 
 fun Engine.conversations(): List<Map<String, Any?>> {
     val online = connectedPeerIds().toSet()
-    return db.query("""SELECT c.*, ct.verified AS verified, ct.identity_changed AS warn, g.active AS gactive
+    return db.query("""SELECT c.*, ct.verified AS verified, ct.identity_changed AS warn, ct.blocked AS blocked,
+        ct.avatar AS avatar, g.active AS gactive
         FROM conversations c LEFT JOIN contacts ct ON ct.id = c.peer_id LEFT JOIN groups g ON g.id = c.group_id
-        ORDER BY c.last_msg_at DESC""").map {
+        ORDER BY c.pinned DESC, c.last_msg_at DESC""").map {
         mapOf(
             "id" to it.str("id"),
             "kind" to it.str("kind"),
@@ -49,6 +57,9 @@ fun Engine.conversations(): List<Map<String, Any?>> {
             "identityWarning" to it.bool("warn"),
             "connected" to (it.strOrNull("peer_id") in online),
             "active" to (it.str("kind") == "direct" || it.bool("gactive")),
+            "pinned" to it.bool("pinned"),
+            "blocked" to it.bool("blocked"),
+            "avatar" to avatarUri(it.blobOrNull("avatar")),
         )
     }
 }

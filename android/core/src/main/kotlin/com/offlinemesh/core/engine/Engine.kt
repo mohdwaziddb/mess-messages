@@ -85,6 +85,11 @@ class Engine(
     private val pendingQrVerify = HashMap<String, String>()        // expected contactId -> token hex
     private val pendingGroupPackets = ArrayList<Pair<Long, ByteArray>>() // sender-key msgs waiting for SKDM
 
+    /** Optional diagnostics sink. Lines carry ids (shortened), link ids and counts only: never content or keys. */
+    var logger: ((String) -> Unit)? = null
+    private fun log(msg: String) { logger?.let { l -> runCatching { l(msg) } } }
+    private fun short(id: String?) = id?.take(8) ?: "-"
+
     var relayEnabled: Boolean
         get() = setting("relay_enabled", "1") == "1"
         set(v) { putSetting("relay_enabled", if (v) "1" else "0") }
@@ -113,17 +118,55 @@ class Engine(
         authedLinks().forEach { sendContent(it.peerId!!, Content.Profile(n), ack = false) }
     }
 
+    // ------------------------------------------------------------------ profile photo
+
+    /** My profile photo (small JPEG/PNG), or null. Stored inside the encrypted database. */
+    val myAvatar: ByteArray?
+        get() = setting("my_avatar", "").takeIf { it.isNotEmpty() }?.let { java.util.Base64.getDecoder().decode(it) }
+
+    /** Set (or with null, remove) my photo and push it to everyone connected right now; others get it on next connect. */
+    fun setMyAvatar(image: ByteArray?) {
+        if (image != null) {
+            if (image.size > Content.MAX_AVATAR) throw EngineException("Photo too large")
+            if (!Content.isImage(image)) throw EngineException("Unsupported image")
+        }
+        putSetting("my_avatar", image?.let { java.util.Base64.getEncoder().encodeToString(it) } ?: "")
+        putSetting("my_avatar_ver", UUID.randomUUID().toString())
+        authedLinks().forEach { st -> runCatching { sendProfile(st.peerId!!) } }
+        changed("contacts", myId)
+    }
+
+    /** Name always; photo only when this peer hasn't received the current version yet. */
+    private fun sendProfile(peerId: String) {
+        sendContent(peerId, Content.Profile(myName), ack = false)
+        val ver = setting("my_avatar_ver", "")
+        if (ver.isNotEmpty() && setting("avatar_sent:$peerId", "") != ver) {
+            sendContent(peerId, Content.Avatar(myAvatar ?: ByteArray(0)), ack = false)
+            putSetting("avatar_sent:$peerId", ver)
+        }
+    }
+
+    // ------------------------------------------------------------------ chat list
+
+    fun setPinned(convId: String, pinned: Boolean) {
+        db.one("SELECT id FROM conversations WHERE id=?", convId) ?: throw EngineException("No conversation")
+        db.exec("UPDATE conversations SET pinned=? WHERE id=?", if (pinned) 1 else 0, convId)
+        changed("conversations", convId)
+    }
+
     // ================================================================== link lifecycle
 
     fun linkUp(link: Link) {
         val st = LinkState(link)
         links[link.id] = st
+        log("link up ${link.id} initiator=${link.initiator} chunk=${link.maxChunk}")
         val caps = (if (relayEnabled) LinkFrame.CAP_RELAY else 0)
         sendFrame(st, LinkFrame.Hello(LinkFrame.PROTOCOL_VERSION, st.nonce, caps))
     }
 
     fun linkDown(linkId: String) {
         val st = links.remove(linkId) ?: return
+        log("link down $linkId peer=${short(st.peerId)}")
         if (st.peerId != null) changed("links", st.peerId)
     }
 
@@ -135,6 +178,7 @@ class Engine(
             onFrame(st, frame)
         } catch (e: Exception) {
             // Any handshake failure tears down the link: never fall back to an unauthenticated mode.
+            log("frame error on ${st.link.id}: ${e.javaClass.simpleName}: ${e.message}")
             if (st.peerId == null) { securityEvent("handshake_failed", null, e.message ?: "error"); drop(st) }
         }
     }
@@ -150,7 +194,7 @@ class Engine(
             if (!store.containsSession(addr) && b != null) runCatching {
                 SessionBuilder(store, addr, myAddr).process(b)
                 st.peerBundle = null
-                sendContent(st.peerId!!, Content.Profile(myName), ack = false)
+                sendProfile(st.peerId!!)
             }
         }
     }
@@ -200,7 +244,11 @@ class Engine(
         // the link initiated by the lower id (if roles differ), otherwise the newest.
         links.values.firstOrNull { it !== st && it.peerId == peerId }?.let { other ->
             val preferInitiatedByMe = myId < peerId
-            if (st.link.initiator != other.link.initiator && other.link.initiator == preferInitiatedByMe) { drop(st); return }
+            if (st.link.initiator != other.link.initiator && other.link.initiator == preferInitiatedByMe) {
+                log("duplicate link to ${short(peerId)}: keep ${other.link.id}, drop ${st.link.id}")
+                drop(st); return
+            }
+            log("duplicate link to ${short(peerId)}: keep ${st.link.id}, drop ${other.link.id}")
             drop(other)
         }
 
@@ -208,6 +256,7 @@ class Engine(
         st.peerIdentity = identity
         st.peerBundle = bundle
         st.authedAt = System.currentTimeMillis()
+        log("authenticated ${st.link.id} peer=${short(peerId)}")
         val isNew = upsertContact(peerId, identity)
 
         val peerAddr = SignalProtocolAddress(peerId, Crypto.DEVICE_ID)
@@ -216,7 +265,7 @@ class Engine(
         if (!haveSession && myId < peerId) {
             SessionBuilder(store, peerAddr, myAddr).process(bundle)
         }
-        if (store.containsSession(peerAddr)) sendContent(peerId, Content.Profile(myName), ack = false)
+        if (store.containsSession(peerAddr)) sendProfile(peerId)
 
         pendingQrVerify.remove(peerId)?.let { token -> completeQrVerification(peerId, token) }
         if (isNew) securityEvent("new_contact", peerId, "First secure connection; identity not yet verified")
@@ -264,9 +313,19 @@ class Engine(
         val dest = row.str("dest_id")
         val direct = linkFor(dest)
         val targets = if (direct != null) listOf(direct) else authedLinks().filter { it.peerCaps and LinkFrame.CAP_RELAY != 0 }
-        if (targets.isEmpty()) return false
+        if (targets.isEmpty()) {
+            log("transmit ${packetId.take(8)} to ${short(dest)}: no path (links=${links.size}, authed=${authedLinks().map { short(it.peerId) }})")
+            return false
+        }
         val bytes = row.blob("packet")
-        targets.forEach { sendFrame(it, LinkFrame.Data(bytes)) }
+        // One broken link must not stop the others or leave the outbox row untouched.
+        val sentOn = targets.count { st ->
+            runCatching { sendFrame(st, LinkFrame.Data(bytes)) }
+                .onFailure { log("send on ${st.link.id} failed: ${it.javaClass.simpleName}: ${it.message}") }
+                .isSuccess
+        }
+        log("transmit ${packetId.take(8)} to ${short(dest)}: ${if (direct != null) "direct" else "relay"} ok=$sentOn/${targets.size}")
+        if (sentOn == 0) return false
         if (!row.bool("needs_ack") && direct != null) {
             db.exec("DELETE FROM outbox WHERE packet_id=?", packetId)
         } else {
@@ -277,7 +336,10 @@ class Engine(
 
     private fun flushFor(st: LinkState) {
         val peer = st.peerId ?: return
-        db.query("SELECT packet_id FROM outbox WHERE dest_id=? ORDER BY created_at", peer).forEach { transmit(it.str("packet_id")) }
+        val queued = db.query("SELECT packet_id, msg_id FROM outbox WHERE dest_id=? ORDER BY created_at", peer)
+        queued.forEach { transmit(it.str("packet_id")) }
+        // Show the new state (clock -> tick) right away instead of on the next 10 s tick.
+        queued.mapNotNull { it.strOrNull("msg_id")?.take(36) }.distinct().forEach { runCatching { refreshStatus(it) } }
         // Store-and-forward: hand queued relay packets to the new neighbour.
         if (relayEnabled) relay.queued(db, clock()).forEach { (pid, bytes, from) ->
             if (from != st.link.id) { sendFrame(st, LinkFrame.Data(bytes)); relay.markForwarded(db, pid) }
@@ -494,8 +556,13 @@ class Engine(
                 // Session responder: reply with our profile once so both sides have names.
                 if (myId > senderId && db.one("SELECT v FROM settings WHERE k=?", "profile_sent:$senderId") == null) {
                     putSetting("profile_sent:$senderId", "1")
-                    runCatching { sendContent(senderId, Content.Profile(myName), ack = false) }
+                    runCatching { sendProfile(senderId) }
                 }
+                ""
+            }
+            is Content.Avatar -> {
+                db.exec("UPDATE contacts SET avatar=? WHERE id=?", if (c.image.isEmpty()) null else c.image, senderId)
+                changed("contacts", senderId); changed("conversations", "d:$senderId")
                 ""
             }
             is Content.Receipt -> { onReceipt(senderId, c); "" }
@@ -846,6 +913,7 @@ class Engine(
         db.exec("UPDATE contacts SET verified=0, verified_at=NULL WHERE id=?", peerId)
         db.exec("DELETE FROM outbox WHERE dest_id=?", peerId)
         db.exec("DELETE FROM settings WHERE k=?", "profile_sent:$peerId")
+        db.exec("DELETE FROM settings WHERE k=?", "avatar_sent:$peerId")
         linkFor(peerId)?.let { drop(it) }
         securityEvent("device_revoked", peerId, "Sessions deleted")
         changed("contacts", peerId)
@@ -888,8 +956,33 @@ class Engine(
     /** Call every ~10 s: retries, expiry, relay queue maintenance, handshake timeouts. */
     fun tick() {
         val now = clock()
-        reapStaleLinks()
-        // Expire undelivered packets -> messages failed. We never claim delivery without a receipt.
+        // Each step runs on its own: one failure must never stop retries and status updates.
+        step("reap") { reapStaleLinks() }
+        step("expire") { expireOutbox(now) }
+        // Retry with exponential backoff.
+        step("retry") {
+            db.query("SELECT packet_id, attempts, last_attempt FROM outbox").forEach { r ->
+                val backoff = minOf(RETRY_BASE_MS shl minOf(r.int("attempts"), 5), RETRY_MAX_MS)
+                if (now - r.long("last_attempt") >= backoff) runCatching { transmit(r.str("packet_id")) }
+                    .onFailure { log("retry ${r.str("packet_id").take(8)} failed: ${it.javaClass.simpleName}") }
+            }
+        }
+        step("status") {
+            db.query("SELECT DISTINCT substr(msg_id, 1, 36) AS m FROM outbox WHERE msg_id IS NOT NULL")
+                .forEach { runCatching { refreshStatus(it.str("m")) } }
+        }
+        step("seen") { db.exec("DELETE FROM seen_packets WHERE expires_at < ?", now) }
+        step("relay") { relay.expire(db, now) }
+        step("groups") { pendingGroupPackets.removeIf { now - it.first > 10 * 60_000 } }
+        changed("stats", null)
+    }
+
+    private inline fun step(name: String, block: () -> Unit) {
+        try { block() } catch (e: Exception) { log("tick step $name failed: ${e.javaClass.simpleName}: ${e.message}") }
+    }
+
+    /** Expire undelivered packets -> messages failed. We never claim delivery without a receipt. */
+    private fun expireOutbox(now: Long) {
         val expired = db.query("SELECT packet_id, msg_id FROM outbox WHERE expires_at < ?", now)
         expired.forEach { r ->
             db.exec("DELETE FROM outbox WHERE packet_id=?", r.str("packet_id"))
@@ -899,16 +992,6 @@ class Engine(
                 }
             }
         }
-        // Retry with exponential backoff.
-        db.query("SELECT packet_id, attempts, last_attempt FROM outbox").forEach { r ->
-            val backoff = minOf(RETRY_BASE_MS shl minOf(r.int("attempts"), 5), RETRY_MAX_MS)
-            if (now - r.long("last_attempt") >= backoff) transmit(r.str("packet_id"))
-        }
-        db.query("SELECT DISTINCT substr(msg_id, 1, 36) AS m FROM outbox WHERE msg_id IS NOT NULL").forEach { refreshStatus(it.str("m")) }
-        db.exec("DELETE FROM seen_packets WHERE expires_at < ?", now)
-        relay.expire(db, now)
-        pendingGroupPackets.removeIf { now - it.first > 10 * 60_000 }
-        changed("stats", null)
     }
 
     fun stats(): Map<String, Any?> = mapOf(
@@ -944,6 +1027,7 @@ class Engine(
     fun putSetting(k: String, v: String) = db.exec("INSERT OR REPLACE INTO settings (k, v) VALUES (?,?)", k, v)
 
     private fun securityEvent(kind: String, contactId: String?, detail: String) {
+        log("event $kind peer=${short(contactId)}")
         db.exec("INSERT INTO security_events (at, kind, contact_id, detail) VALUES (?,?,?,?)", clock(), kind, contactId, detail)
         db.exec("DELETE FROM security_events WHERE id NOT IN (SELECT id FROM security_events ORDER BY id DESC LIMIT 500)")
         changed("security", contactId)

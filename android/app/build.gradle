@@ -82,8 +82,8 @@ android {
         applicationId "com.offlinemesh"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "0.1.0-beta"
+        versionCode 6
+        versionName "0.1.5-beta"
     }
     compileOptions {
         // Required by libsignal-android (java.time etc. on older Android versions).

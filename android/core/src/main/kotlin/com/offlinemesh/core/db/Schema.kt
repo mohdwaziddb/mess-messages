@@ -55,6 +55,11 @@ object Schema {
                 dist BLOB NOT NULL, received_at INTEGER NOT NULL, PRIMARY KEY (group_id, sender_id))""",
             "CREATE TABLE used_qr_tokens (token TEXT PRIMARY KEY, used_at INTEGER NOT NULL)",
         ),
+        // V2: pinned chats, contact profile photos.
+        listOf(
+            "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE contacts ADD COLUMN avatar BLOB",
+        ),
     )
 
     fun migrate(db: Sql) {

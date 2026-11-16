@@ -14,7 +14,7 @@ We say plainly what the beta does: **all traffic currently goes over BLE.** The 
 
 - Each phone advertises (connectable) the service UUID plus 8 random bytes. They change every **15 minutes**, and also on every restart.
   - No device name and no Tx power are included.
-- Each phone scans with a service-data filter.
+- Each phone runs two scans: one with a service-data filter (keeps working with the screen off) and one unfiltered scan matched in software, because some chipsets silently drop 128-bit service-data filters. The Troubleshooting screen shows live advertising/scanning state and how many Bluetooth signals were heard.
 - Entries are keyed by Bluetooth address, and a rotated id from the same device is merged into the same entry.
 - A device that hasn't been seen for 30 seconds is removed from the list (unless it is connected).
 - **Auto-connect** (can be turned off in Privacy):
